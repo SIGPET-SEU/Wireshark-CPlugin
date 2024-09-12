@@ -1,11 +1,10 @@
 /* packet-vmess.c
  *
- * Updated routines for Gryphon protocol packet dissection
- * By Mark C. <markc@dgtech.com>
- * Copyright (C) 2018 DG Technologies, Inc. (Dearborn Group, Inc.) USA
+ * Updated routines for VMess protocol packet dissection
+ * By Linxiao Yu <yulinxiaoybbb@gmail.com>
  *
- * Routines for Gryphon protocol packet disassembly
- * By Steve Limkemann <stevelim@dgtech.com>
+ * Routines for VMess protocol packet disassembly
+ * By Linxiao Yu <stevelim@dgtech.com>
  * Copyright 1998 Steve Limkemann
  *
  * Wireshark - Network traffic analyzer
@@ -14,7 +13,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Specification: http://www.dgtech.com/product/vmess/manual/html/GCprotocol/
+ * Specification: https://xtls.github.io/development/protocols/vmess.html
  *
  */
 
@@ -30,12 +29,6 @@
 #include <string.h>
 #include <glib.h>
 #include "packet-vmess.h"
-
-/*
- * See
- *
- *     https://www.dgtech.com/product/vmess/manual/html/GCprotocol/
- */
 
 void
 proto_register_vmess(void)
@@ -181,8 +174,6 @@ dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
             conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
             proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
     }
-    //tls_handle = find_dissector("tls");
-    //call_dissector(tls_handle, next_tvb, pinfo, tree);
 
     return 0;
 }
@@ -233,24 +224,6 @@ dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
             proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
     }
 
-    //tls_handle = find_dissector("tls");
-    //if (pinfo->can_desegment > 0)
-    //    pinfo->can_desegment++;
-    //call_dissector(tls_handle, next_tvb, pinfo, tree);
-    //if (pinfo->desegment_len) {
-    //    pinfo->desegment_offset += 2;
-    //}
-    // 
-    //streaming_reassembly_info_t* streaming_reassembly_info = NULL;
-    //if (!PINFO_FD_VISITED(pinfo)) {
-    //    streaming_reassembly_info = streaming_reassembly_info_new();
-    //}
-
-    //reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
-    //                                                vmess_tree, proto_tree_get_parent_tree(tree), proto_vmess_streaming_reassembly_table,
-    //                                                streaming_reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
-    //                                                proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
-
     return 0;
 }
 
@@ -267,7 +240,6 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     if (tvb_reported_length(tvb) > 61) {
         char tmp_auth[17];
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, 17);
-        /*tvb_get_string_bytes(tvb, 0, 16, ENC_ASCII | ENC_STR_HEX | ENC_SEP_NONE, tmp_auth, NULL);*/
         if(char_array_eq(auth, tmp_auth, 16))
             is_request = true;
     }
@@ -299,54 +271,6 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     }
 
     return tvb_reported_length(tvb);
-
-    //col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMESS");
-    ///* Clear the info column */
-    //col_clear(pinfo->cinfo, COL_INFO);
-
-    //const char* auth = "\xb0\xb2\x5c\xda\x68\x1c\x15\x53\x74\xb3\x5b\x5f\xcc\x3f\x81\xe7";
-
-    //bool is_request = false;
-
-    //conversation_t* conversation;
-    //vmess_conv_t* conv_data;
-
-    //conv_data = get_vmess_conversation_data(pinfo, &conversation);
-
-    //return dissect_vmess_on_stream(tvb, pinfo, tree, conv_data, FALSE, NULL);
-
-
-    //if (tvb_reported_length(tvb) > 61) {
-    //    char tmp_auth[17];
-    //    tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, 17);
-    //    /*tvb_get_string_bytes(tvb, 0, 16, ENC_ASCII | ENC_STR_HEX | ENC_SEP_NONE, tmp_auth, NULL);*/
-    //    if(char_array_eq(auth, tmp_auth, 16))
-    //        is_request = true;
-    //}
-
-    //if (is_request) {
-    //    dissect_vmess_request(tvb, pinfo, tree, NULL);
-    //    return tvb_captured_length(tvb);
-    //}
-
-    //bool is_response = false;
-    //gint pos = tvb_find_TLS_signiture(tvb);
-    //if (pos == 40) is_response = true;
-
-    //if (is_response) {
-    //    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment, VMESS_RESPONSE_HEADER_LENGTH,
-    //        get_dissect_vmess_response_len, dissect_vmess_response_pdu, data);
-    //    return tvb_reported_length(tvb);
-    //}
-    //else {
-    //    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment, VMESS_DATA_HEADER_LENGTH,
-    //        get_dissect_vmess_data_len, dissect_vmess_data_pdu, data);
-    //    return tvb_reported_length(tvb);
-    //}
-
-
-    ///* The number returned tells how many bytes are consumed by current dissector */
-    //return tvb_captured_length(tvb); 
 }
 
 bool
@@ -453,136 +377,4 @@ get_vmess_conversation_data(packet_info* pinfo, conversation_t** conversation)
     }
 
     return conv_data;
-}
-
-static int dissect_vmess_on_stream(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree,
-    vmess_conv_t* conv_data, gboolean end_of_stream, const guint32* seq) {
-    int	offset = 0;
-    int	len = 0;
-
-    while (tvb_reported_length_remaining(tvb, offset) > 0) {
-        /* Switch protocol if the data starts after response headers. */
-        if (conv_data->startframe &&
-            (pinfo->num > conv_data->startframe ||
-                (pinfo->num == conv_data->startframe && offset >= conv_data->startoffset))) {
-            /* Increase pinfo->can_desegment because we are traversing
-             * http and want to preserve desegmentation functionality for
-             * the proxied protocol
-             */
-            if (pinfo->can_desegment > 0)
-                pinfo->can_desegment++;
-            if (conv_data->next_handle) {
-                call_dissector_only(conv_data->next_handle, tvb_new_subset_remaining(tvb, offset), pinfo, tree, NULL);
-            }
-            else {
-                call_data_dissector(tvb_new_subset_remaining(tvb, offset), pinfo, tree);
-            }
-            /*
-             * If a subdissector requests reassembly, be sure not to
-             * include the preceding VMess headers.
-             */
-            if (pinfo->desegment_len) {
-                pinfo->desegment_offset += offset;
-            }
-            break;
-        }
-        len = dissect_vmess_message(tvb, offset, pinfo, tree, conv_data, "VMess", proto_vmess, end_of_stream, seq);
-        if (len < 0)
-            break;
-        offset += len;
-
-        /*
-         * OK, we've set the Protocol and Info columns for the
-         * first VMess message; set a fence so that subsequent
-         * VMess messages don't overwrite the Info column.
-         */
-        col_set_fence(pinfo->cinfo, COL_INFO);
-    }
-    /* dissect_vmess_message() returns -2 if message is not valid VMess */
-    return (len == -2)
-        ? 0
-        : (int)tvb_captured_length(tvb);
-}
-
-static int dissect_http_message(tvbuff_t* tvb, int offset, packet_info* pinfo, proto_tree* tree, vmess_conv_t* conv_data,
-    const char* proto_tag, int proto, gboolean end_of_stream, const guint32* const seq) {
-
-    proto_tree* vmess_tree = NULL;
-    proto_item* ti = NULL;
-    proto_item* hidden_item;
-    const guchar* line, * firstline;
-    gint		next_offset;
-    const guchar* linep, * lineend;
-    int		orig_offset = offset;
-    int		first_linelen, linelen;
-    gboolean	is_request_or_reply, is_tls = FALSE;
-    gboolean	saw_req_resp_or_header;
-    //media_container_type_t     http_type;
-    proto_item* hdr_item = NULL;
-    //ReqRespDissector reqresp_dissector;
-    proto_tree* req_tree;
-    int		colon_offset;
-    //headers_t* headers = NULL;
-    int		datalen;
-    int		reported_datalen = -1;
-    dissector_handle_t handle = NULL;
-    bool	dissected = false;
-    gboolean	first_loop = TRUE;
-    gboolean	have_seen_vmess = FALSE;
-    /*guint		i;*/
-    /*http_info_value_t *si;*/
-    //http_eo_t* eo_info;
-    heur_dtbl_entry_t* hdtbl_entry;
-    int reported_length;
-    guint16 word;
-    gboolean	leading_crlf = FALSE;
-    gboolean	excess_data = FALSE;
-    //media_content_info_t* content_info = NULL;
-    wmem_map_t* header_value_map = NULL;
-    int 		chunk_offset = 0;
-    wmem_map_t* chunk_map = NULL;
-
-    gboolean streaming_chunk_mode = FALSE;
-    gboolean begin_with_chunk = FALSE;
-    vmess_streaming_reassembly_data_t* streaming_reassembly_data = NULL;
-
-    vmess_req_res_t* curr = (vmess_req_res_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, VMESS_PROTO_DATA_REQRES);
-    vmess_req_res_private_data_t* prv_data = curr ? (vmess_req_res_private_data_t*)curr->private_data : NULL;
-    vmess_req_res_private_data_t* tail_prv_data = NULL;
-
-    /* Determine the direction as in the TCP dissector, but don't call
-     * get_tcp_conversation_data because we don't want to create a new
-     * TCP stream if it doesn't exist.
-     */
-    int direction = cmp_address(&pinfo->src, &pinfo->dst);
-    /* if the addresses are equal, match the ports instead */
-    if (direction == 0) {
-        direction = (pinfo->srcport > pinfo->destport) ? 1 : -1;
-    }
-    if (direction >= 0) {
-        chunk_map = conv_data->chunk_offsets_fwd;
-    }
-    else {
-        chunk_map = conv_data->chunk_offsets_rev;
-    }
-
-    if (seq && chunk_map) {
-        chunk_offset = GPOINTER_TO_INT(wmem_map_lookup(chunk_map, GUINT_TO_POINTER(*seq)));
-        /* Returns 0 when there is no entry in the map, as we want. */
-    }
-
-    reported_length = tvb_reported_length_remaining(tvb, offset);
-    if (reported_length < 1) {
-        return -1;
-    }
-
-    /*
-     * If we previously dissected an VMess request in this conversation then
-     * we should be pretty sure that whatever we got in this TVB is
-     * actually VMess (even if what we have here is part of a file being
-     * transferred over VMess).
-     */
-    if (conv_data->req_res_tail)
-        have_seen_vmess = TRUE;
-
 }

@@ -1,12 +1,10 @@
 /* packet-vmess.h
  *
  * Updated routines for VMess protocol packet dissection
- * By Mark C. <markc@dgtech.com>
- * Copyright (C) 2018 DG Technologies, Inc. (Dearborn Group, Inc.) USA
+ * By Linxiao Yu. <yulinxiaoybbb@gmail.com>
  *
  * Definitions for VMess packet disassembly structures and routines
- * By Steve Limkemann <stevelim@dgtech.com>
- * Copyright 1998 Steve Limkemann
+ * By Linxiao Yu. <yulinxiaoybbb@gmail.com>
  *
  * Wireshark - Network traffic analyzer
  * By Gerald Combs <gerald@wireshark.org>
@@ -197,11 +195,3 @@ static const fragment_items msg_frag_items = {
     &hf_msg_reassembled_in,
     &hf_msg_reassembled_length,
  };
-
-static vmess_conv_t* get_vmess_conversation_data(packet_info* pinfo, conversation_t** conversation);
-
-static int dissect_vmess_on_stream(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree,
-    vmess_conv_t* conv_data, gboolean end_of_stream, const guint32* seq);
-
-static int dissect_http_message(tvbuff_t* tvb, int offset, packet_info* pinfo,proto_tree* tree, vmess_conv_t* conv_data,
-    const char* proto_tag, int proto, gboolean end_of_stream, const guint32* const seq);

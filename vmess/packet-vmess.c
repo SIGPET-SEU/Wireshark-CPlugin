@@ -284,11 +284,8 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
 
     if (conv_data && is_response && pinfo->num > conv_data->startframe) {
 
-        /* User code */
         save_port_type = pinfo->ptype;
         pinfo->ptype = PT_NONE;
-        /* User code end */
-
         save_can_desegment = pinfo->can_desegment;
         pinfo->can_desegment = pinfo->saved_can_desegment;
 
@@ -297,19 +294,12 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
             get_dissect_vmess_response_len,
             dissect_vmess_response_pdu, data);
 
-        /* User code */
         pinfo->ptype = save_port_type;
-        /* User code end */
-
         pinfo->can_desegment = save_can_desegment;
     }
     else {
-
-        /* User code */
         save_port_type = pinfo->ptype;
         pinfo->ptype = PT_NONE;
-        /* User code end */
-
         save_can_desegment = pinfo->can_desegment;
         pinfo->can_desegment = pinfo->saved_can_desegment;
 
@@ -317,10 +307,7 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
             VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
             dissect_vmess_data_pdu, data);
 
-        /* User code */
         pinfo->ptype = save_port_type;
-        /* User code end */
-
         pinfo->can_desegment = save_can_desegment;
     }
 
@@ -405,30 +392,4 @@ tvb_find_TLS_signiture(tvbuff_t* tvb) {
     }
 
     return min_pos;
-}
-
-static vmess_conv_t*
-get_vmess_conversation_data(packet_info* pinfo, conversation_t** conversation)
-{
-    vmess_conv_t* conv_data;
-
-    *conversation = find_or_create_conversation(pinfo);
-
-    /* Retrieve information from conversation
-     * or add it if it isn't there yet
-     */
-    conv_data = (vmess_conv_t*)conversation_get_proto_data(*conversation, proto_vmess);
-    if (!conv_data) {
-        /* Setup the conversation structure itself */
-        conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
-        conv_data->chunk_offsets_fwd = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
-        conv_data->chunk_offsets_rev = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
-        conv_data->req_list = NULL;
-        conv_data->matches_table = wmem_map_new(wmem_file_scope(), g_direct_hash, g_direct_equal);
-
-        conversation_add_proto_data(*conversation, proto_vmess,
-            conv_data);
-    }
-
-    return conv_data;
 }

@@ -67,6 +67,7 @@ static char* TLS_signiture[TLS_SIGNUM] = {
 
 static bool vmess_desegment = true; /* VMess is run atop of TCP */
 
+#define VMESS_AUTH_LENGTH (guint) 16
 #define VMESS_RESPONSE_HEADER_LENGTH (guint) 40
 #define VMESS_DATA_HEADER_LENGTH (guint) 2
 
@@ -99,7 +100,7 @@ typedef struct _vmess_req_res_t {
 
 typedef struct _vmess_conv_t {
     streaming_reassembly_info_t* reassembly_info;
-
+    gchar* auth;
     /* Used to speed up desegmenting of chunked Transfer-Encoding. */
     wmem_map_t* chunk_offsets_fwd;
     wmem_map_t* chunk_offsets_rev;

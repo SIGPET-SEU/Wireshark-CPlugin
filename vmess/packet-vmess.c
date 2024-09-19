@@ -216,6 +216,7 @@ dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
 
     tls_handle = find_dissector("tls");
 
+
     if (next_tvb) {
         //add_new_data_source(pinfo, next_tvb, "vmess segment data");
         reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
@@ -232,17 +233,40 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
 {
     conversation_t* conversation;
     vmess_conv_t* conv_data = NULL;
+    port_type save_port_type;
+    guint16 save_can_desegment;
 
-    const char* auth = "\xb0\xb2\x5c\xda\x68\x1c\x15\x53\x74\xb3\x5b\x5f\xcc\x3f\x81\xe7";
+    /* get conversation, create if necessary*/
+    conversation = find_or_create_conversation(pinfo);
+
+    /* get associated state information, create if necessary */
+    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
+    if (!conv_data) {
+        conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
+        conv_data->auth = NULL;
+        conversation_add_proto_data(conversation, proto_vmess, conv_data);
+    }
+    if (!conv_data->reassembly_info) {
+        conv_data->reassembly_info = streaming_reassembly_info_new();
+    }
+
+    //const char* auth = "\xb0\xb2\x5c\xda\x68\x1c\x15\x53\x74\xb3\x5b\x5f\xcc\x3f\x81\xe7";
+    //const char* auth = "\x43\xe7\xf4\x86\xc9\x36\xde\x80\xec\x3d\x0e\xbf\x82\x06\x5e\x8c";
+    const char* auth = "\xfc\xc1\x8b\x89\x42\xc6\x70\xfd\xcb\x17\xe3\xb0\x7f\x72\xf2\x7f";
 
     bool is_request = false;
 
-    if (tvb_reported_length(tvb) > 61) {
-        char tmp_auth[17];
-        tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, 17);
-        if(char_array_eq(auth, tmp_auth, 16))
-            is_request = true;
+    if (!conv_data->auth) { /* If the auth of the conversation is not NULL, there is no need for auth check */
+        if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
+            gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
+            tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
+            if (char_array_eq(auth, tmp_auth, VMESS_AUTH_LENGTH)) {
+                conv_data->auth = wmem_strndup(pinfo->pool, tmp_auth, VMESS_AUTH_LENGTH);
+                is_request = true;
+            }
+        }
     }
+    
 
     if (is_request) {
         dissect_vmess_request(tvb, pinfo, tree, NULL);
@@ -259,15 +283,45 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     }
 
     if (conv_data && is_response && pinfo->num > conv_data->startframe) {
+
+        /* User code */
+        save_port_type = pinfo->ptype;
+        pinfo->ptype = PT_NONE;
+        /* User code end */
+
+        save_can_desegment = pinfo->can_desegment;
+        pinfo->can_desegment = pinfo->saved_can_desegment;
+
         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
             VMESS_RESPONSE_HEADER_LENGTH,
             get_dissect_vmess_response_len,
             dissect_vmess_response_pdu, data);
+
+        /* User code */
+        pinfo->ptype = save_port_type;
+        /* User code end */
+
+        pinfo->can_desegment = save_can_desegment;
     }
     else {
+
+        /* User code */
+        save_port_type = pinfo->ptype;
+        pinfo->ptype = PT_NONE;
+        /* User code end */
+
+        save_can_desegment = pinfo->can_desegment;
+        pinfo->can_desegment = pinfo->saved_can_desegment;
+
         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
             VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
             dissect_vmess_data_pdu, data);
+
+        /* User code */
+        pinfo->ptype = save_port_type;
+        /* User code end */
+
+        pinfo->can_desegment = save_can_desegment;
     }
 
     return tvb_reported_length(tvb);

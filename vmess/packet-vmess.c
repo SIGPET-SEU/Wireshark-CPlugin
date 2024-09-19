@@ -108,23 +108,48 @@ proto_register_vmess(void)
 
     reassembly_table_register(&proto_vmess_streaming_reassembly_table,
         &addresses_ports_reassembly_table_functions);
+
+    vmess_handle = register_dissector("vmess", dissect_vmess, proto_vmess);
 }
 
 void
 proto_reg_handoff_vmess(void)
 {
-    static dissector_handle_t vmess_handle;
-
-    vmess_handle = create_dissector_handle(dissect_vmess, proto_vmess);
+    //vmess_handle = create_dissector_handle(dissect_vmess, proto_vmess);
+    vmess_request_handle = create_dissector_handle(dissect_vmess_request, proto_vmess);
+    tls_handle = find_dissector("tls");
     dissector_add_uint("tcp.port", VMESS_TCP_PORT, vmess_handle);
 }
 
-static void
+static int
 dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+    conversation_t* conversation;
+    vmess_conv_t* conv_data;
+
+    /* get conversation, create if necessary*/
+    conversation = find_or_create_conversation(pinfo);
+
+    /* get associated state information, create if necessary */
+    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
+    if (!conv_data) {
+        conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
+        conversation_add_proto_data(conversation, proto_vmess, conv_data);
+    }
+    if (!conv_data->reassembly_info) {
+        conv_data->reassembly_info = streaming_reassembly_info_new();
+    }
+
     col_set_str(pinfo->cinfo, COL_INFO, "VMESS Request");
     proto_item* ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     proto_tree* vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_request_auth, tvb, 0, 16, ENC_BIG_ENDIAN);
+
+    reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0, tvb_reported_length_remaining(tvb, 0),
+        vmess_tree, tree, proto_vmess_streaming_reassembly_table,
+        conv_data->reassembly_info, get_virtual_frame_num64(tvb, pinfo, 0), vmess_request_handle,
+        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
+
+    return 0;
 }
 
 static guint
@@ -165,7 +190,7 @@ dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
 
     next_tvb = tvb_new_subset_remaining(tvb, 40);
 
-    tls_handle = find_dissector("tls");
+    //tls_handle = find_dissector("tls");
 
     if (next_tvb) {
         //add_new_data_source(pinfo, next_tvb, "vmess segment data");
@@ -214,7 +239,7 @@ dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
 
     next_tvb = tvb_new_subset_remaining(tvb, 2);
 
-    tls_handle = find_dissector("tls");
+    //tls_handle = find_dissector("tls");
 
 
     if (next_tvb) {
@@ -277,39 +302,30 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     gint pos = tvb_find_TLS_signiture(tvb);
     if (pos == 40) is_response = true;
 
-    conversation = find_conversation_pinfo(pinfo, 0);
-    if (conversation) {
-        conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
-    }
+    //conversation = find_conversation_pinfo(pinfo, 0);
+    //if (conversation) {
+    //    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
+    //}
+
+    //save_port_type = pinfo->ptype;
+    //pinfo->ptype = PT_NONE;
+    //save_can_desegment = pinfo->can_desegment;
+    //pinfo->can_desegment = pinfo->saved_can_desegment;
 
     if (conv_data && is_response && pinfo->num > conv_data->startframe) {
-
-        save_port_type = pinfo->ptype;
-        pinfo->ptype = PT_NONE;
-        save_can_desegment = pinfo->can_desegment;
-        pinfo->can_desegment = pinfo->saved_can_desegment;
-
         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
             VMESS_RESPONSE_HEADER_LENGTH,
             get_dissect_vmess_response_len,
             dissect_vmess_response_pdu, data);
-
-        pinfo->ptype = save_port_type;
-        pinfo->can_desegment = save_can_desegment;
     }
     else {
-        save_port_type = pinfo->ptype;
-        pinfo->ptype = PT_NONE;
-        save_can_desegment = pinfo->can_desegment;
-        pinfo->can_desegment = pinfo->saved_can_desegment;
-
         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
             VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
             dissect_vmess_data_pdu, data);
-
-        pinfo->ptype = save_port_type;
-        pinfo->can_desegment = save_can_desegment;
     }
+
+    //pinfo->ptype = save_port_type;
+    //pinfo->can_desegment = save_can_desegment;
 
     return tvb_reported_length(tvb);
 }

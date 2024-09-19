@@ -15,7 +15,7 @@
 
 void proto_register_vmess(void);
 void proto_reg_handoff_vmess(void);
-static void dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+static int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
@@ -47,6 +47,7 @@ gint mem_search(const char* haystack, guint haystack_size, const char* needle, g
 
 static dissector_handle_t vmess_handle;
 static dissector_handle_t tls_handle;
+static dissector_handle_t vmess_request_handle;
 
 #define TLS_SIGNUM (gint)5 /* The number of TLS record types. */
 

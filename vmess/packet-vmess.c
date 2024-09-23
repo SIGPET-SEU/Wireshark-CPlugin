@@ -26,100 +26,11 @@
 #include <epan/conversation.h>
 #include <epan/dissectors/packet-tcp.h>
 #include <wsutil/str_util.h>
+#include <wsutil/file_util.h>
+#include <wsutil/wslog.h>
 #include <string.h>
 #include <glib.h>
 #include "packet-vmess.h"
-
-void
-proto_register_vmess(void)
-{
-    static hf_register_info hf[] = {
-        { &hf_vmess_request_auth, 
-            {"VMess Request Auth", "vmess.request.auth",
-            FT_BYTES, BASE_NONE,
-            NULL, 0x0,
-            NULL, HFILL }
-        },
-        { &hf_vmess_response_header,
-            {"VMess Response Header", "vmess.response.header",
-            FT_BYTES, BASE_NONE,
-            NULL, 0x0,
-            NULL, HFILL }
-        },
-        { &hf_vmess_payload_length,
-            {"VMess Payload Length", "vmess.payload.length",
-            FT_UINT16, BASE_DEC,
-            NULL, 0x0,
-            NULL, HFILL }
-        },
-        { &hf_msg_fragments,
-            {"Reassembled VMess Message fragments", "vmess.msg.fragments",
-            FT_NONE, BASE_NONE, NULL, 0x00, NULL, HFILL }
-        },
-        { &hf_msg_fragment,
-            {"Message fragment", "vmess.msg.fragment",
-            FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_fragment_overlap,
-            {"Message fragment overlap", "vmess.msg.fragment.overlap",
-            FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_fragment_overlap_conflicts,
-            {"Message fragment overlapping with conflicting data",
-            "vmess.msg.fragment.overlap.conflicts",
-            FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_fragment_multiple_tails,
-            {"Message has multiple tail fragments",
-            "vmess.msg.fragment.multiple_tails",
-            FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_fragment_too_long_fragment,
-            {"Message fragment too long", "vmess.msg.fragment.too_long_fragment",
-            FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_fragment_error,
-            {"Message defragmentation error", "vmess.msg.fragment.error",
-            FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_fragment_count,
-            {"Message fragment count", "vmess.msg.fragment.count",
-            FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_reassembled_in,
-            {"Reassembled in", "vmess.msg.reassembled.in",
-            FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_reassembled_length,
-            {"Reassembled length", "vmess.msg.reassembled.length",
-            FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_body_segment,
-            {"VMess body segment", "vmess.msg.body.segment",
-            FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL } },
-        };
-
-    /* Setup protocol subtree array */
-    static int* ett[] = {
-        &ett_vmess,
-        &ett_msg_fragment,
-        &ett_msg_fragments
-    };
-
-    proto_vmess = proto_register_protocol (
-        "VMESS Protocol", /* name        */
-        "VMESS",          /* short name  */
-        "vmess"           /* filter_name */
-        );
-
-    proto_register_field_array(proto_vmess, hf, array_length(hf));
-    proto_register_subtree_array(ett, array_length(ett));
-
-    reassembly_table_register(&proto_vmess_streaming_reassembly_table,
-        &addresses_ports_reassembly_table_functions);
-
-    vmess_handle = register_dissector("vmess", dissect_vmess, proto_vmess);
-}
-
-void
-proto_reg_handoff_vmess(void)
-{
-    //vmess_handle = create_dissector_handle(dissect_vmess, proto_vmess);
-    vmess_request_handle = create_dissector_handle(dissect_vmess_request, proto_vmess);
-    tls_handle = find_dissector("tls");
-    dissector_add_uint("tcp.port", VMESS_TCP_PORT, vmess_handle);
-}
 
 static int
 dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
@@ -247,6 +158,8 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
         conv_data->reassembly_info = streaming_reassembly_info_new();
     }
 
+    vmess_keylog_read();
+
     //const char* auth = "\xb0\xb2\x5c\xda\x68\x1c\x15\x53\x74\xb3\x5b\x5f\xcc\x3f\x81\xe7";
     //const char* auth = "\x43\xe7\xf4\x86\xc9\x36\xde\x80\xec\x3d\x0e\xbf\x82\x06\x5e\x8c";
     const char* auth = "\xfc\xc1\x8b\x89\x42\xc6\x70\xfd\xcb\x17\xe3\xb0\x7f\x72\xf2\x7f";
@@ -259,7 +172,7 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
         if (char_array_eq(auth, tmp_auth, VMESS_AUTH_LENGTH)) {
             if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { /* If the auth of the conversation is not NULL, there is no need for auth check */
-                conv_data->auth = "\xfc\xc1\x8b\x89\x42\xc6\x70\xfd\xcb\x17\xe3\xb0\x7f\x72\xf2\x7f";
+                conv_data->auth = wmem_strndup(wmem_file_scope(), auth, VMESS_AUTH_LENGTH);
             }
             is_request = true;
         }
@@ -295,6 +208,102 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     pinfo->can_desegment = save_can_desegment;
 
     return tvb_reported_length(tvb);
+}
+
+
+
+static void
+vmess_keylog_read(void) {
+    if (!vmess_decryption_supported) {
+        return;
+    }
+
+    if (!pref_keylog_file || !*pref_keylog_file) {
+        vmess_debug_printf("No keyfile selected.\n");
+        return;
+    }
+
+    // Reopen file if it got deleted/overwritten.
+    if (vmess_keylog_file && file_needs_reopen(ws_fileno(vmess_keylog_file), pref_keylog_file)) {
+        ws_debug("Key log file got changed or deleted, trying to re-open.");
+        vmess_keylog_reset();
+    }
+
+    if (!vmess_keylog_file) {
+        vmess_keylog_file = ws_fopen(pref_keylog_file, "r");
+        if (!vmess_keylog_file) {
+            ws_debug("Failed to open key log file %s: %s", pref_keylog_file, g_strerror(errno));
+            return;
+        }
+        ws_debug("Opened key log file %s", pref_keylog_file);
+    }
+
+    /* File format: each line follows the format "<type>=<key>" (leading spaces
+     * and spaces around '=' are ignored).
+     * For available <type>s, see below. <key> is the base64-encoded key (44
+     * characters).
+     *
+     * Example:
+     *  AUTH = AKeZaHwBxjiKLFnkY2unvEdOTtg4AL+M9dQXfopFVFk=
+     *  REMOTE_STATIC_PUBLIC_KEY = YDCttCs9e1J52/g9vEnwJJa+2x6RqaayAYMpSVQfGEY=
+     *  LOCAL_EPHEMERAL_PRIVATE_KEY = sLGLJSOQfyz7JNJ5ZDzFf3Uz1rkiCMMjbWerNYcPFFU=
+     *  PRESHARED_KEY = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+     */
+
+    for (;;) {
+        char buf[512];
+        if (!fgets(buf, sizeof(buf), vmess_keylog_file)) {
+            if (feof(vmess_keylog_file)) {
+                clearerr(vmess_keylog_file);
+            }
+            else if (ferror(vmess_keylog_file)) {
+                ws_debug("Error while reading %s, closing it.", pref_keylog_file);
+                vmess_keylog_reset();
+            }
+            break;
+        }
+
+        vmess_keylog_process_lines((const guint8*)buf, (guint)strlen(buf));
+    }
+}
+
+static void
+vmess_keylog_reset(void)
+{
+    if (vmess_keylog_file) {
+        fclose(vmess_keylog_file);
+        vmess_keylog_file = NULL;
+    }
+}
+
+static void
+vmess_keylog_process_lines(const void* data, guint datalen) {
+    const char* next_line = (const char*)data;
+    const char* line_end = next_line + datalen;
+    while (next_line && next_line < line_end) {
+        /* Note: line is NOT nul-terminated. */
+        const char* line = next_line;
+        next_line = (const char*)memchr(line, '\n', line_end - line);
+        gssize linelen;
+
+        if (next_line) {
+            linelen = next_line - line;
+            next_line++;    /* drop LF */
+        }
+        else {
+            linelen = (gssize)(line_end - line);
+        }
+        if (linelen > 0 && line[linelen - 1] == '\r') {
+            linelen--;      /* drop CR */
+        }
+
+        ws_debug("Read VMess key log line: %.*s", (int)linelen, line);
+    }
+}
+
+static gboolean
+vmess_decrypt_init(void) {
+    return TRUE;
 }
 
 bool
@@ -375,4 +384,165 @@ tvb_find_TLS_signiture(tvbuff_t* tvb) {
     }
 
     return min_pos;
+}
+
+#ifdef VMESS_DECRYPT_DEBUG
+void
+vmess_debug_printf(const gchar* fmt, ...)
+{
+    va_list ap;
+
+    if (!vmess_debug_file)
+        return;
+
+    va_start(ap, fmt);
+    vfprintf(vmess_debug_file, fmt, ap);
+    va_end(ap);
+}
+
+void
+vmess_set_debug(const gchar* name) {
+    static gint debug_file_must_be_closed;
+    gint        use_stderr;
+
+    use_stderr = name ? (strcmp(name, VMESS_DEBUG_USE_STDERR) == 0) : 0;
+
+    if (debug_file_must_be_closed)
+        fclose(vmess_debug_file);
+
+    if (use_stderr)
+        vmess_debug_file = stderr;
+    else if (!name || (strcmp(name, "") == 0))
+        vmess_debug_file = NULL;
+    else
+        vmess_debug_file = ws_fopen(name, "w");
+
+    if (!use_stderr && vmess_debug_file)
+        debug_file_must_be_closed = 1;
+    else
+        debug_file_must_be_closed = 0;
+
+    vmess_debug_printf("Wireshark VMess debug log \n\n");
+}
+
+void
+vmess_prefs_apply_cb(void) {
+    vmess_set_debug(vmess_debug_file_name);
+}
+#endif
+
+void
+proto_register_vmess(void)
+{
+    module_t* vmess_module;
+
+    static hf_register_info hf[] = {
+        { &hf_vmess_request_auth,
+            {"VMess Request Auth", "vmess.request.auth",
+            FT_BYTES, BASE_NONE,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_response_header,
+            {"VMess Response Header", "vmess.response.header",
+            FT_BYTES, BASE_NONE,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_payload_length,
+            {"VMess Payload Length", "vmess.payload.length",
+            FT_UINT16, BASE_DEC,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_msg_fragments,
+            {"Reassembled VMess Message fragments", "vmess.msg.fragments",
+            FT_NONE, BASE_NONE, NULL, 0x00, NULL, HFILL }
+        },
+        { &hf_msg_fragment,
+            {"Message fragment", "vmess.msg.fragment",
+            FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_fragment_overlap,
+            {"Message fragment overlap", "vmess.msg.fragment.overlap",
+            FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_fragment_overlap_conflicts,
+            {"Message fragment overlapping with conflicting data",
+            "vmess.msg.fragment.overlap.conflicts",
+            FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_fragment_multiple_tails,
+            {"Message has multiple tail fragments",
+            "vmess.msg.fragment.multiple_tails",
+            FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_fragment_too_long_fragment,
+            {"Message fragment too long", "vmess.msg.fragment.too_long_fragment",
+            FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_fragment_error,
+            {"Message defragmentation error", "vmess.msg.fragment.error",
+            FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_fragment_count,
+            {"Message fragment count", "vmess.msg.fragment.count",
+            FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_reassembled_in,
+            {"Reassembled in", "vmess.msg.reassembled.in",
+            FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_reassembled_length,
+            {"Reassembled length", "vmess.msg.reassembled.length",
+            FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
+        { &hf_msg_body_segment,
+            {"VMess body segment", "vmess.msg.body.segment",
+            FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+    };
+
+    /* Setup protocol subtree array */
+    static int* ett[] = {
+        &ett_vmess,
+        &ett_msg_fragment,
+        &ett_msg_fragments
+    };
+
+    proto_vmess = proto_register_protocol(
+        "VMESS Protocol", /* name        */
+        "VMESS",          /* short name  */
+        "vmess"           /* filter_name */
+    );
+
+    proto_register_field_array(proto_vmess, hf, array_length(hf));
+    proto_register_subtree_array(ett, array_length(ett));
+
+    reassembly_table_register(&proto_vmess_streaming_reassembly_table,
+        &addresses_ports_reassembly_table_functions);
+
+    vmess_handle = register_dissector("vmess", dissect_vmess, proto_vmess);
+
+#ifdef VMESS_DECRYPT_DEBUG
+    vmess_module = prefs_register_protocol(proto_vmess, vmess_prefs_apply_cb);
+#else
+    vmess_module = prefs_register_protocol(proto_vmess, NULL);
+#endif // VMESS_DECRYPT_DEBUG
+
+    prefs_register_filename_preference(vmess_module, "keylog_file", "Key log filename",
+        "The path to the file which contains a list of secrets in the following format:\n"
+        "\"<key-type> = <base64-encoded-key>\" (without quotes, leading spaces and spaces around '=' are ignored).\n"
+        "<key-type> is one of: AUTH, REMOTE_STATIC_PUBLIC_KEY, "
+        "LOCAL_EPHEMERAL_PRIVATE_KEY or PRESHARED_KEY.",
+        &pref_keylog_file, FALSE);
+
+    prefs_register_filename_preference(vmess_module, "debug_file", "VMess debug file",
+        "Redirect VMess debug to the file specified. Leave empty to disable debugging "
+        "or use \"" VMESS_DEBUG_USE_STDERR "\" to redirect output to stderr.",
+        &vmess_debug_file_name, TRUE);
+
+    vmess_decryption_supported = vmess_decrypt_init();
+}
+
+void
+proto_reg_handoff_vmess(void)
+{
+    //vmess_handle = create_dissector_handle(dissect_vmess, proto_vmess);
+    //vmess_request_handle = create_dissector_handle(dissect_vmess_request, proto_vmess);
+#ifdef VMESS_DECRYPT_DEBUG
+    vmess_set_debug(vmess_debug_file_name);
+#endif
+    tls_handle = find_dissector("tls");
+    dissector_add_uint("tcp.port", VMESS_TCP_PORT, vmess_handle);
 }

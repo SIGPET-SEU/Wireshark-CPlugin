@@ -19,31 +19,19 @@ static int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* 
 static int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-
-bool gbytearray_eq(const GByteArray*, const GByteArray*);
-
-bool char_array_eq(const char*, const char*, size_t);
+static void vmess_keylog_read(void);
 
 /*
- * Search if the tvb contains the needle, start at offset, end at offset + maxlength, if maxlength
- * is -1, then search until the end of the tvb. Returns the offset of the first match if found,
- * or -1 otherwise.
- * NOTE: This function will strip the terminating nul of the needle.
+ * Reset the keylog file.
  */
-gint tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle);
+static void vmess_keylog_reset(void);
+
+static void vmess_keylog_process_lines(const void* data, guint datalen);
 
 /*
- * Search if the tvb contains the TLS signatures. If the tvb contains any of
- * the signature, then return the first offset (>=0) of all the possible match.
- * Otherwise, return -1.
+ * Must be called before attempting decryption.
  */
-gint tvb_find_TLS_signiture(tvbuff_t* tvb);
-
-/*
- * Search a string (needle) in another string (haystack), like memmem in glibc, except that we
- * return the index instead of the pointer to the match. It returns -1 if no match was found.
- */
-gint mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size);
+static gboolean vmess_decrypt_init(void);
 
 static dissector_handle_t vmess_handle;
 static dissector_handle_t tls_handle;
@@ -65,6 +53,23 @@ static char* TLS_signiture[TLS_SIGNUM] = {
 #define VMESS_TCP_PORT 20332 /* Not IANA registed */
 
 static bool vmess_desegment = true; /* VMess is run atop of TCP */
+
+/* Keylog and decryption related variables */
+static bool vmess_decryption_supported;
+static const gchar* pref_keylog_file;
+/*
+ * Key log file handle. Opened on demand (when keys are actually looked up),
+ * closed when the capture file closes.
+ */
+static FILE* vmess_keylog_file;
+
+
+/*
+ * User preference related variables.
+ * See Section 2.6 in README.dissector for some guide.
+ * 
+ * See packet-wireguard.c for instructions on how to register pref in practice.
+ */
 
 #define VMESS_AUTH_LENGTH (guint) 16
 #define VMESS_RESPONSE_HEADER_LENGTH (guint) 40
@@ -196,3 +201,49 @@ static const fragment_items msg_frag_items = {
     &hf_msg_reassembled_in,
     &hf_msg_reassembled_length,
  };
+
+/* Some util functions */
+bool gbytearray_eq(const GByteArray*, const GByteArray*);
+
+bool char_array_eq(const char*, const char*, size_t);
+
+/*
+ * Search if the tvb contains the needle, start at offset, end at offset + maxlength, if maxlength
+ * is -1, then search until the end of the tvb. Returns the offset of the first match if found,
+ * or -1 otherwise.
+ * NOTE: This function will strip the terminating nul of the needle.
+ */
+gint tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle);
+
+/*
+ * Search if the tvb contains the TLS signatures. If the tvb contains any of
+ * the signature, then return the first offset (>=0) of all the possible match.
+ * Otherwise, return -1.
+ */
+gint tvb_find_TLS_signiture(tvbuff_t* tvb);
+
+/*
+ * Search a string (needle) in another string (haystack), like memmem in glibc, except that we
+ * return the index instead of the pointer to the match. It returns -1 if no match was found.
+ */
+gint mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size);
+
+/* Debug relavant variables and functions */
+/* From packet-ssh.c, packet-tls.c and packet-tls-utils.c */
+#define VMESS_DECRYPT_DEBUG
+
+#ifdef VMESS_DECRYPT_DEBUG /* {{{ */
+
+static const gchar* vmess_debug_file_name;
+#define VMESS_DEBUG_USE_STDERR "-"
+
+static FILE* vmess_debug_file;
+
+void vmess_set_debug(const gchar* name);
+
+void vmess_debug_printf(const gchar* fmt, ...);
+
+void vmess_prefs_apply_cb(void);
+#else
+#define vmess_set_debug(name)
+#endif /* VMESS_DECRYPT_DEBUG }}} */

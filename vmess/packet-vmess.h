@@ -244,6 +244,9 @@ void vmess_set_debug(const gchar* name);
 void vmess_debug_printf(const gchar* fmt, ...);
 
 void vmess_prefs_apply_cb(void);
+
+void vmess_debug_flush(void);
 #else
 #define vmess_set_debug(name)
+#define vmess_debug_flush()
 #endif /* VMESS_DECRYPT_DEBUG }}} */

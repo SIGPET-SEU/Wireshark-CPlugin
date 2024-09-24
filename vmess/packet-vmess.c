@@ -180,6 +180,9 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
 
     if (is_request) {
         dissect_vmess_request(tvb, pinfo, tree, NULL);
+
+        vmess_debug_flush();
+
         return tvb_captured_length(tvb);
     }
 
@@ -207,6 +210,8 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     pinfo->ptype = save_port_type;
     pinfo->can_desegment = save_can_desegment;
 
+    vmess_debug_flush();
+
     return tvb_reported_length(tvb);
 }
 
@@ -219,7 +224,7 @@ vmess_keylog_read(void) {
     }
 
     if (!pref_keylog_file || !*pref_keylog_file) {
-        vmess_debug_printf("No keyfile selected.\n");
+        vmess_debug_printf("No Keylog file is selected.\n");
         return;
     }
 
@@ -428,6 +433,11 @@ vmess_set_debug(const gchar* name) {
 void
 vmess_prefs_apply_cb(void) {
     vmess_set_debug(vmess_debug_file_name);
+}
+void vmess_debug_flush(void)
+{
+    if (vmess_debug_file)
+        fflush(vmess_debug_file);
 }
 #endif
 

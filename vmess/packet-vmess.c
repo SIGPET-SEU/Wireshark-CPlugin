@@ -243,16 +243,14 @@ vmess_keylog_read(void) {
         ws_debug("Opened key log file %s", pref_keylog_file);
     }
 
-    /* File format: each line follows the format "<type>=<key>" (leading spaces
-     * and spaces around '=' are ignored).
-     * For available <type>s, see below. <key> is the base64-encoded key (44
-     * characters).
+    /*
      *
-     * Example:
-     *  AUTH = AKeZaHwBxjiKLFnkY2unvEdOTtg4AL+M9dQXfopFVFk=
-     *  REMOTE_STATIC_PUBLIC_KEY = YDCttCs9e1J52/g9vEnwJJa+2x6RqaayAYMpSVQfGEY=
-     *  LOCAL_EPHEMERAL_PRIVATE_KEY = sLGLJSOQfyz7JNJ5ZDzFf3Uz1rkiCMMjbWerNYcPFFU=
-     *  PRESHARED_KEY = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+     * File format: each line of the keylog file follows the format
+     * 
+     * <TYPE> <VALUE>
+     *
+     * currently, only AUTH type is supported. The value is a 16-byte string.
+     *
      */
 
     for (;;) {
@@ -267,9 +265,14 @@ vmess_keylog_read(void) {
             }
             break;
         }
-
-        vmess_keylog_process_lines((const guint8*)buf, (guint)strlen(buf));
+        vmess_keylog_process_line((const guint8*)buf);
     }
+
+    /* For debugging, print the key map table. */
+#define VMESS_DEBUG_PRINT_KEY_MAP
+#ifdef VMESS_DEBUG_PRINT_KEY_MAP
+    vmess_debug_print_hash_table(vmess_key_map);
+#endif // VMESS_DEBUG_PRINT_KEY_MAP
 }
 
 static void
@@ -282,28 +285,33 @@ vmess_keylog_reset(void)
 }
 
 static void
-vmess_keylog_process_lines(const void* data, guint datalen) {
-    const char* next_line = (const char*)data;
-    const char* line_end = next_line + datalen;
-    while (next_line && next_line < line_end) {
-        /* Note: line is NOT nul-terminated. */
-        const char* line = next_line;
-        next_line = (const char*)memchr(line, '\n', line_end - line);
-        gssize linelen;
+vmess_keylog_process_line(const char* line)
+{
+    ws_noisy("vmess process line: %s", line);
 
-        if (next_line) {
-            linelen = next_line - line;
-            next_line++;    /* drop LF */
-        }
-        else {
-            linelen = (gssize)(line_end - line);
-        }
-        if (linelen > 0 && line[linelen - 1] == '\r') {
-            linelen--;      /* drop CR */
-        }
+    gchar** split = g_strsplit(line, " ", 2);
+    gchar * auth, * hex_auth_val;
+    gchar * key = (gchar*)wmem_alloc(wmem_file_scope(), 2 * sizeof(gchar));
+    size_t auth_len;
 
-        ws_debug("Read VMess key log line: %.*s", (int)linelen, line);
+    if (g_strv_length(split) == 2) {
+        // Auth file format: [key type] [hex-encoded key material]
+        auth = split[0];
+        hex_auth_val = split[1];
     }
+    else {
+        vmess_debug_printf("vmess keylog: invalid format");
+        g_strfreev(split);
+        return;
+    }
+
+    gchar* auth_val = (gchar*)wmem_alloc(wmem_file_scope(), VMESS_AUTH_LENGTH * sizeof(gchar));
+
+    from_hex(auth_val, hex_auth_val, strlen(hex_auth_val));
+
+    g_hash_table_insert(vmess_key_map, auth_val, key);
+
+    g_strfreev(split);
 }
 
 static gboolean
@@ -434,12 +442,43 @@ void
 vmess_prefs_apply_cb(void) {
     vmess_set_debug(vmess_debug_file_name);
 }
-void vmess_debug_flush(void)
+
+void
+vmess_debug_flush(void)
 {
     if (vmess_debug_file)
         fflush(vmess_debug_file);
 }
+
+void vmess_debug_print_hash_table(GHashTable* hash_table) {
+    g_hash_table_foreach(hash_table, (GHFunc)vmess_debug_print_key_value, NULL);
+}
+
+void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_data) {
+    vmess_debug_printf("Key: %s, Value: %s\n", (char*)key, (char*)value);
+}
+
 #endif
+
+/* from_hex converts |hex_len| bytes of hex data from |in| and sets |*out| to
+ * the result. |out->data| will be allocated using wmem_file_scope. Returns TRUE on
+ * success. */
+static gboolean from_hex(gchar* out, const gchar* in, gsize hex_len) {
+    gsize i;
+
+    if (hex_len & 1)
+        return FALSE;
+
+    out = (guchar*)wmem_alloc(wmem_file_scope(), hex_len / 2);
+    for (i = 0; i < hex_len / 2; i++) {
+        int a = ws_xton(in[i * 2]);
+        int b = ws_xton(in[i * 2 + 1]);
+        if (a == -1 || b == -1)
+            return FALSE;
+        out[i] = a << 4 | b;
+    }
+    return TRUE;
+}
 
 void
 proto_register_vmess(void)
@@ -541,6 +580,12 @@ proto_register_vmess(void)
         "Redirect VMess debug to the file specified. Leave empty to disable debugging "
         "or use \"" VMESS_DEBUG_USE_STDERR "\" to redirect output to stderr.",
         &vmess_debug_file_name, TRUE);
+
+    /* Allocate memory for key map, refer to packet-ssh.c for a more complex key map management.
+     * Currently, the k/v of key map are all plain strings. Therefore, the built-in g_xxx
+     * funtions should be enough:)
+     */
+    vmess_key_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
     vmess_decryption_supported = vmess_decrypt_init();
 }

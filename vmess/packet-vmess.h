@@ -26,7 +26,7 @@ static void vmess_keylog_read(void);
  */
 static void vmess_keylog_reset(void);
 
-static void vmess_keylog_process_lines(const void* data, guint datalen);
+static void vmess_keylog_process_line(const char* line);
 
 /*
  * Must be called before attempting decryption.
@@ -57,6 +57,7 @@ static bool vmess_desegment = true; /* VMess is run atop of TCP */
 /* Keylog and decryption related variables */
 static bool vmess_decryption_supported;
 static const gchar* pref_keylog_file;
+static GHashTable* vmess_key_map; /* Structure used for recording auth, key and IV's */
 /*
  * Key log file handle. Opened on demand (when keys are actually looked up),
  * closed when the capture file closes.
@@ -246,7 +247,13 @@ void vmess_debug_printf(const gchar* fmt, ...);
 void vmess_prefs_apply_cb(void);
 
 void vmess_debug_flush(void);
+
+void vmess_debug_print_hash_table(GHashTable* hash_table);
+
+void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_data);
 #else
 #define vmess_set_debug(name)
 #define vmess_debug_flush()
+#define vmess_debug_print_hash_table(hash_table)
+#define vmess_debug_print_key_value(key, value, user_data)
 #endif /* VMESS_DECRYPT_DEBUG }}} */

@@ -246,6 +246,8 @@ void vmess_debug_printf(const gchar* fmt, ...);
 
 void vmess_prefs_apply_cb(void);
 
+static void vmess_shutdown(void);
+
 void vmess_debug_flush(void);
 
 void vmess_debug_print_hash_table(GHashTable* hash_table);

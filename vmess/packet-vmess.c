@@ -258,6 +258,11 @@ vmess_keylog_read(void) {
         if (!fgets(buf, sizeof(buf), vmess_keylog_file)) {
             if (feof(vmess_keylog_file)) {
                 clearerr(vmess_keylog_file);
+                /* For debugging, print the key map table. */
+//#define VMESS_DEBUG_PRINT_KEY_MAP
+#ifdef VMESS_DEBUG_PRINT_KEY_MAP
+                vmess_debug_print_hash_table(vmess_key_map);
+#endif // VMESS_DEBUG_PRINT_KEY_MAP
             }
             else if (ferror(vmess_keylog_file)) {
                 ws_debug("Error while reading %s, closing it.", pref_keylog_file);
@@ -268,11 +273,6 @@ vmess_keylog_read(void) {
         vmess_keylog_process_line((const guint8*)buf);
     }
 
-    /* For debugging, print the key map table. */
-#define VMESS_DEBUG_PRINT_KEY_MAP
-#ifdef VMESS_DEBUG_PRINT_KEY_MAP
-    vmess_debug_print_hash_table(vmess_key_map);
-#endif // VMESS_DEBUG_PRINT_KEY_MAP
 }
 
 static void
@@ -291,7 +291,8 @@ vmess_keylog_process_line(const char* line)
 
     gchar** split = g_strsplit(line, " ", 2);
     gchar * auth, * hex_auth_val;
-    gchar * key = (gchar*)wmem_alloc(wmem_file_scope(), 2 * sizeof(gchar));
+    gchar* key = wmem_strdup(wmem_file_scope(), "Dummy"); /* Use wmem_xxx first, then consider g_xxx */
+    
     size_t auth_len;
 
     if (g_strv_length(split) == 2) {
@@ -305,9 +306,9 @@ vmess_keylog_process_line(const char* line)
         return;
     }
 
-    gchar* auth_val = (gchar*)wmem_alloc(wmem_file_scope(), VMESS_AUTH_LENGTH * sizeof(gchar));
+    gchar* auth_val = NULL;
 
-    from_hex(auth_val, hex_auth_val, strlen(hex_auth_val));
+    from_hex(&auth_val, hex_auth_val, strlen(hex_auth_val));
 
     g_hash_table_insert(vmess_key_map, auth_val, key);
 
@@ -438,6 +439,11 @@ vmess_set_debug(const gchar* name) {
     vmess_debug_printf("Wireshark VMess debug log \n\n");
 }
 
+static void
+vmess_shutdown(void) {
+    g_hash_table_destroy(vmess_key_map);
+}
+
 void
 vmess_prefs_apply_cb(void) {
     vmess_set_debug(vmess_debug_file_name);
@@ -451,6 +457,7 @@ vmess_debug_flush(void)
 }
 
 void vmess_debug_print_hash_table(GHashTable* hash_table) {
+    vmess_debug_printf("VMess Key Map size: %d\n", g_hash_table_size(hash_table));
     g_hash_table_foreach(hash_table, (GHFunc)vmess_debug_print_key_value, NULL);
 }
 
@@ -463,19 +470,19 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 /* from_hex converts |hex_len| bytes of hex data from |in| and sets |*out| to
  * the result. |out->data| will be allocated using wmem_file_scope. Returns TRUE on
  * success. */
-static gboolean from_hex(gchar* out, const gchar* in, gsize hex_len) {
+static gboolean from_hex(gchar** out, const gchar* in, gsize hex_len) {
     gsize i;
 
     if (hex_len & 1)
         return FALSE;
 
-    out = (guchar*)wmem_alloc(wmem_file_scope(), hex_len / 2);
+    *out = (guchar*)wmem_alloc(wmem_file_scope(), hex_len / 2);
     for (i = 0; i < hex_len / 2; i++) {
         int a = ws_xton(in[i * 2]);
         int b = ws_xton(in[i * 2 + 1]);
         if (a == -1 || b == -1)
             return FALSE;
-        out[i] = a << 4 | b;
+        (*out)[i] = a << 4 | b; /* NOTE: Bracket-ref [] is prior to dereference * */
     }
     return TRUE;
 }
@@ -588,6 +595,7 @@ proto_register_vmess(void)
     vmess_key_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
     vmess_decryption_supported = vmess_decrypt_init();
+    register_shutdown_routine(vmess_shutdown);
 }
 
 void

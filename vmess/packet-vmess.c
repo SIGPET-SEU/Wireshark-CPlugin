@@ -167,12 +167,25 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     bool is_request = false;
 
     
+    //if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
+    //    gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
+    //    tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
+    //    if (char_array_eq(auth, tmp_auth, VMESS_AUTH_LENGTH)) {
+    //        if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { 
+    //            conv_data->auth = wmem_strndup(wmem_file_scope(), tmp_auth, VMESS_AUTH_LENGTH);
+    //            g_free(tmp_auth);
+    //        }
+    //        is_request = true;
+    //    }
+    //}
+
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
         if (char_array_eq(auth, tmp_auth, VMESS_AUTH_LENGTH)) {
-            if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { /* If the auth of the conversation is not NULL, there is no need for auth check */
-                conv_data->auth = wmem_strndup(wmem_file_scope(), auth, VMESS_AUTH_LENGTH);
+            if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { 
+                conv_data->auth = wmem_strndup(wmem_file_scope(), tmp_auth, VMESS_AUTH_LENGTH);
+                g_free(tmp_auth);
             }
             is_request = true;
         }
@@ -428,24 +441,31 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 
 #endif
 
-/* from_hex converts |hex_len| bytes of hex data from |in| and sets |*out| to
+/*
+ * from_hex converts |hex_len| bytes of hex data from |in| and sets |*out| to
  * the result. |out->data| will be allocated using wmem_file_scope. Returns TRUE on
- * success. */
+ * success.
+ * 
+ * Note that we manually add '\0' to the string end.
+ */
 static gboolean from_hex(gchar** out, const gchar* in, gsize hex_len) {
     gsize i;
+    gsize size = (hex_len / 2) * sizeof(gchar);
 
     if (hex_len & 1)
         return FALSE;
 
     //*out = (gchar*)g_malloc((hex_len / 2)*sizeof(gchar));
-    *out = (gchar*)wmem_alloc(wmem_file_scope(), (hex_len / 2) * sizeof(gchar));
-    for (i = 0; i < hex_len / 2; i++) {
+    /* Manually add '\0' to the end. */
+    *out = (gchar*)wmem_alloc(wmem_file_scope(), size + 1);
+    for (i = 0; i < size; i++) {
         int a = ws_xton(in[i * 2]);
         int b = ws_xton(in[i * 2 + 1]);
         if (a == -1 || b == -1)
             return FALSE;
         (*out)[i] = a << 4 | b; /* NOTE: Bracket-ref [] is prior to dereference * */
     }
+    (*out)[i] = '\0';
     return TRUE;
 }
 

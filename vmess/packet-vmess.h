@@ -28,6 +28,14 @@ static void vmess_keylog_reset(void);
 
 static void vmess_keylog_process_line(const char* line);
 
+static void vmess_init(void);
+
+static void vmess_cleanup(void);
+
+static void vmess_shutdown(void);
+
+static void vmess_free(gpointer data);
+
 /*
  * Must be called before attempting decryption.
  */
@@ -245,8 +253,6 @@ void vmess_set_debug(const gchar* name);
 void vmess_debug_printf(const gchar* fmt, ...);
 
 void vmess_prefs_apply_cb(void);
-
-static void vmess_shutdown(void);
 
 void vmess_debug_flush(void);
 

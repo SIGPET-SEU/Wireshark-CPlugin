@@ -286,6 +286,9 @@ vmess_keylog_read(void) {
             }
             break;
         }
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n')) { len -= 1; buf[len] = 0; }
+
         vmess_keylog_process_line((const guint8*)buf);
     }
 

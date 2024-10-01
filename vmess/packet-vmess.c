@@ -364,11 +364,6 @@ void vmess_cleanup(void)
     }
 }
 
-static void
-vmess_shutdown(void) {
-    g_hash_table_destroy(vmess_key_map);
-}
-
 void vmess_free(gpointer data)
 {
     if (data == NULL)
@@ -576,7 +571,6 @@ proto_register_vmess(void)
     register_cleanup_routine(vmess_cleanup);
 
     vmess_decryption_supported = vmess_decrypt_init();
-    register_shutdown_routine(vmess_shutdown);
 }
 
 void

@@ -286,6 +286,8 @@ vmess_keylog_read(void) {
             }
             break;
         }
+
+        /* Strip '\n' and '\r' chars from lines. */
         size_t len = strlen(buf);
         while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n')) { len -= 1; buf[len] = 0; }
 
@@ -298,6 +300,13 @@ static void
 vmess_keylog_process_line(const char* line)
 {
     ws_noisy("vmess process line: %s", line);
+
+    /* Check if this line is the header of keylog file, i.e.,
+     * the line starts with #
+     */
+
+    if (strlen(line) > 0 && line[0] == '#')
+        return;
 
     gchar** split = g_strsplit(line, " ", 2);
     gchar * auth, * hex_auth_val;

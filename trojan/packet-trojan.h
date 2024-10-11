@@ -10,19 +10,21 @@ void proto_reg_handoff_trojan(void); // 3. 将 Trojan 协议和解析器加载�
 
 static int dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static int dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static bool dissect_trojan_over_http1(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static int dissect_trojan_over_http2(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static bool dissect_trojan_heur_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, void* data);
 
 bool char_array_eq(const char* arr_1, const char* arr_2, size_t len);
 gint tvb_find_crlf_pos(tvbuff_t* tvb);
+gint tvb_find_TLS_signiture(tvbuff_t* tvb);
+gint tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle);
+gint mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size);
 
 /****************Trojan Utils Function End******************/
 
-#define TROJAN_TCP_PORT 49637
-#define TROJAN_PASSWORD_LENGTH (guint)56
-#define TROJAN_CRLF_LENGTH (guint)2
-#define TROJAN_PORT_LENGTH (guint)2
+#define TROJAN_TLS_PORT 49637
+#define TROJAN_REQUEST_MAX_LENGTH 150 // Trojan 最大请求长度，非官方，
+#define TROJAN_PASSWORD_LENGTH 56
+#define TROJAN_CRLF_LENGTH 2
+#define TROJAN_PORT_LENGTH 2
 
 static int proto_trojan;
 
@@ -30,8 +32,6 @@ static dissector_handle_t trojan_handle;
 static dissector_handle_t tls_handle;
 static dissector_handle_t h2_handle;
 static dissector_handle_t http_handle;
-static dissector_handle_t http_tcp_handle;
-static dissector_handle_t http_tls_handle;
 
 const char* TROJAN_CRLF = "\x0d\x0a";
 
@@ -60,8 +60,5 @@ static int hf_trojan_tunnel_data; // 数据流
 /****************Trojan ETT Fields******************/
 
 static gint ett_trojan;
-
-static gint ett_msg_fragment;
-static gint ett_msg_fragments;
 
 /****************Trojan ETT Fields End******************/

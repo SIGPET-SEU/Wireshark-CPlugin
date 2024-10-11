@@ -162,17 +162,31 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
 
     //const char* auth = "\xb0\xb2\x5c\xda\x68\x1c\x15\x53\x74\xb3\x5b\x5f\xcc\x3f\x81\xe7";
     //const char* auth = "\x43\xe7\xf4\x86\xc9\x36\xde\x80\xec\x3d\x0e\xbf\x82\x06\x5e\x8c";
-    const char* auth = "\xfc\xc1\x8b\x89\x42\xc6\x70\xfd\xcb\x17\xe3\xb0\x7f\x72\xf2\x7f";
+    //const char* auth = "\xfc\xc1\x8b\x89\x42\xc6\x70\xfd\xcb\x17\xe3\xb0\x7f\x72\xf2\x7f";
 
     bool is_request = false;
 
     
+    //if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
+    //    gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
+    //    tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
+    //    if (char_array_eq(auth, tmp_auth, VMESS_AUTH_LENGTH)) {
+    //        if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { 
+    //            conv_data->auth = wmem_strndup(wmem_file_scope(), tmp_auth, VMESS_AUTH_LENGTH);
+    //            g_free(tmp_auth);
+    //        }
+    //        is_request = true;
+    //    }
+    //}
+
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
-        if (char_array_eq(auth, tmp_auth, VMESS_AUTH_LENGTH)) {
-            if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { /* If the auth of the conversation is not NULL, there is no need for auth check */
-                conv_data->auth = wmem_strndup(wmem_file_scope(), auth, VMESS_AUTH_LENGTH);
+        gchar* key = g_hash_table_lookup(vmess_key_map, tmp_auth);
+        if (key) {
+            if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { 
+                conv_data->auth = wmem_strndup(wmem_file_scope(), tmp_auth, VMESS_AUTH_LENGTH);
+                g_free(tmp_auth);
             }
             is_request = true;
         }
@@ -232,6 +246,7 @@ vmess_keylog_read(void) {
     if (vmess_keylog_file && file_needs_reopen(ws_fileno(vmess_keylog_file), pref_keylog_file)) {
         ws_debug("Key log file got changed or deleted, trying to re-open.");
         vmess_keylog_reset();
+        g_hash_table_remove_all(vmess_key_map);
     }
 
     if (!vmess_keylog_file) {
@@ -258,30 +273,27 @@ vmess_keylog_read(void) {
         if (!fgets(buf, sizeof(buf), vmess_keylog_file)) {
             if (feof(vmess_keylog_file)) {
                 clearerr(vmess_keylog_file);
+                /* For debugging, print the key map table. */
+#define VMESS_DEBUG_PRINT_KEY_MAP
+#ifdef VMESS_DEBUG_PRINT_KEY_MAP
+                vmess_debug_print_hash_table(vmess_key_map);
+#endif // VMESS_DEBUG_PRINT_KEY_MAP
             }
             else if (ferror(vmess_keylog_file)) {
                 ws_debug("Error while reading %s, closing it.", pref_keylog_file);
                 vmess_keylog_reset();
+                g_hash_table_remove_all(vmess_key_map);
             }
             break;
         }
+
+        /* Strip '\n' and '\r' chars from lines. */
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n')) { len -= 1; buf[len] = 0; }
+
         vmess_keylog_process_line((const guint8*)buf);
     }
 
-    /* For debugging, print the key map table. */
-#define VMESS_DEBUG_PRINT_KEY_MAP
-#ifdef VMESS_DEBUG_PRINT_KEY_MAP
-    vmess_debug_print_hash_table(vmess_key_map);
-#endif // VMESS_DEBUG_PRINT_KEY_MAP
-}
-
-static void
-vmess_keylog_reset(void)
-{
-    if (vmess_keylog_file) {
-        fclose(vmess_keylog_file);
-        vmess_keylog_file = NULL;
-    }
 }
 
 static void
@@ -289,9 +301,25 @@ vmess_keylog_process_line(const char* line)
 {
     ws_noisy("vmess process line: %s", line);
 
+    /* Check if this line is the header of keylog file, i.e.,
+     * the line starts with #
+     */
+
+    if (strlen(line) > 0 && line[0] == '#')
+        return;
+
     gchar** split = g_strsplit(line, " ", 2);
     gchar * auth, * hex_auth_val;
-    gchar * key = (gchar*)wmem_alloc(wmem_file_scope(), 2 * sizeof(gchar));
+    /*
+     * Use wmem_xxx first, then consider g_xxx, finally seek for xxx in standard C lib.
+     * See https://gitlab.com/wireshark/wireshark/-/blob/master/doc/README.wmem
+     * 
+     * NOTE: Memory allocated by wmem_alloc should be freed with wmem_free,
+     * memory allocated by g_malloc should be freed using g_free.
+     * Otherwise, it may cause Access Violation Reading exception.
+     */
+    gchar* key = wmem_strdup(wmem_file_scope(), "Dummy");
+    
     size_t auth_len;
 
     if (g_strv_length(split) == 2) {
@@ -305,98 +333,58 @@ vmess_keylog_process_line(const char* line)
         return;
     }
 
-    gchar* auth_val = (gchar*)wmem_alloc(wmem_file_scope(), VMESS_AUTH_LENGTH * sizeof(gchar));
+    gchar* auth_val = NULL;
 
-    from_hex(auth_val, hex_auth_val, strlen(hex_auth_val));
+    from_hex(&auth_val, hex_auth_val, strlen(hex_auth_val));
 
     g_hash_table_insert(vmess_key_map, auth_val, key);
 
     g_strfreev(split);
 }
 
+
 static gboolean
 vmess_decrypt_init(void) {
     return TRUE;
 }
 
-bool
-gbytearray_eq(const GByteArray* arr_1, const GByteArray* arr_2) {
-    if (arr_1 == NULL && arr_2 == NULL)
-        return true;
-
-    if (arr_1 == NULL || arr_2 == NULL)
-        return false;
-
-    if (arr_1->len != arr_2->len)
-        return false;
-
-    return memcmp(arr_1->data, arr_2->data, arr_1->len)== 0;
-}
-
-bool
-char_array_eq(const char* arr_1, const char* arr_2, size_t len) {
-    if (arr_1 == NULL && arr_2 == NULL)
-        return true;
-
-    if (arr_1 == NULL || arr_2 == NULL)
-        return false;
-
-    return memcmp(arr_1, arr_2, len) == 0;
-}
-
-gint
-mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size) {
-    if (haystack == NULL || needle == NULL) {
-        g_print("Warning: Either haystack or needle is NULL\n");
-        return -1;
+static void
+vmess_keylog_reset(void)
+{
+    if (vmess_keylog_file) {
+        fclose(vmess_keylog_file);
+        vmess_keylog_file = NULL;
     }
-    
-
-    if (needle_size == 0) return 0; /* Empty needle matches the beginning of haystack */
-    if (haystack_size < needle_size) return -1; /* Haystack is smaller than needle */
-
-    guint limit = haystack_size - needle_size;
-
-    for (guint i = 0; i <= limit; i++)
-        if (memcmp(haystack + i, needle, needle_size) == 0)
-            return (gint) i; /* Warning: Convert unsigned int to int */
-    return -1;
 }
 
-gint
-tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle) {
-
-    guint limit_bufsize = tvb_reported_length_remaining(tvb, offset);
-    guint bufsize;
-    if (max_length < 0)
-        bufsize = limit_bufsize + 1; /* 1 for the terminating nul */
-    else
-        if ((guint)max_length < limit_bufsize)
-            bufsize = (guint)max_length + 1;
-        else {
-            g_print("Warning: max_length is larger than the tvb remaining size, clip to the tvb remaining size.\n");
-            bufsize = limit_bufsize + 1;
-        }
-    char* buffer = (char*) malloc(bufsize);
-    tvb_get_raw_bytes_as_string(tvb, offset, buffer, bufsize);
-    /* Strip the terminating nul for both buffer and needle */
-    return mem_search(buffer, bufsize-1, needle, 3);
+void vmess_init(void)
+{
+    /* Allocate memory for key map, refer to packet-tls.c for a more complex key map management.
+     * Currently, the k/v of key map are all plain strings. Therefore, the built-in g_xxx
+     * funtions should be enough:)
+     */
+    vmess_key_map = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
+    vmess_debug_flush();
 }
 
-gint
-tvb_find_TLS_signiture(tvbuff_t* tvb) {
-    gint min_pos = -1;
-
-    for (gint i = 0; i < TLS_SIGNUM; i++) {
-        gint pos = tvb_find_bytes(tvb, 0, -1, TLS_signiture[i]);
-        if (pos >= 0)
-            if (min_pos >= 0)
-                min_pos = min_pos <= pos ? min_pos : pos;
-            else
-                min_pos = pos;
+void vmess_cleanup(void)
+{
+    g_hash_table_destroy(vmess_key_map);
+    if (vmess_keylog_file) {
+        fclose(vmess_keylog_file);
+        vmess_keylog_file = NULL;
     }
+}
 
-    return min_pos;
+void vmess_free(gpointer data)
+{
+    if (data == NULL)
+        return;
+
+    /* Note that the memory allocated by wmem_alloc should be freed
+     * by wmem_free, instead of g_free.
+     */
+    wmem_free(wmem_file_scope(), data);
 }
 
 #ifdef VMESS_DECRYPT_DEBUG
@@ -451,6 +439,7 @@ vmess_debug_flush(void)
 }
 
 void vmess_debug_print_hash_table(GHashTable* hash_table) {
+    vmess_debug_printf("VMess Key Map size: %d\n", g_hash_table_size(hash_table));
     g_hash_table_foreach(hash_table, (GHFunc)vmess_debug_print_key_value, NULL);
 }
 
@@ -460,23 +449,31 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 
 #endif
 
-/* from_hex converts |hex_len| bytes of hex data from |in| and sets |*out| to
+/*
+ * from_hex converts |hex_len| bytes of hex data from |in| and sets |*out| to
  * the result. |out->data| will be allocated using wmem_file_scope. Returns TRUE on
- * success. */
-static gboolean from_hex(gchar* out, const gchar* in, gsize hex_len) {
+ * success.
+ * 
+ * Note that we manually add '\0' to the string end.
+ */
+static gboolean from_hex(gchar** out, const gchar* in, gsize hex_len) {
     gsize i;
+    gsize size = (hex_len / 2) * sizeof(gchar);
 
     if (hex_len & 1)
         return FALSE;
 
-    out = (guchar*)wmem_alloc(wmem_file_scope(), hex_len / 2);
-    for (i = 0; i < hex_len / 2; i++) {
+    //*out = (gchar*)g_malloc((hex_len / 2)*sizeof(gchar));
+    /* Manually add '\0' to the end. */
+    *out = (gchar*)wmem_alloc(wmem_file_scope(), size + 1);
+    for (i = 0; i < size; i++) {
         int a = ws_xton(in[i * 2]);
         int b = ws_xton(in[i * 2 + 1]);
         if (a == -1 || b == -1)
             return FALSE;
-        out[i] = a << 4 | b;
+        (*out)[i] = a << 4 | b; /* NOTE: Bracket-ref [] is prior to dereference * */
     }
+    (*out)[i] = '\0';
     return TRUE;
 }
 
@@ -581,11 +578,9 @@ proto_register_vmess(void)
         "or use \"" VMESS_DEBUG_USE_STDERR "\" to redirect output to stderr.",
         &vmess_debug_file_name, TRUE);
 
-    /* Allocate memory for key map, refer to packet-ssh.c for a more complex key map management.
-     * Currently, the k/v of key map are all plain strings. Therefore, the built-in g_xxx
-     * funtions should be enough:)
-     */
-    vmess_key_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+
+    register_init_routine(vmess_init);
+    register_cleanup_routine(vmess_cleanup);
 
     vmess_decryption_supported = vmess_decrypt_init();
 }
@@ -600,4 +595,84 @@ proto_reg_handoff_vmess(void)
 #endif
     tls_handle = find_dissector("tls");
     dissector_add_uint("tcp.port", VMESS_TCP_PORT, vmess_handle);
+}
+
+bool
+gbytearray_eq(const GByteArray* arr_1, const GByteArray* arr_2) {
+    if (arr_1 == NULL && arr_2 == NULL)
+        return true;
+
+    if (arr_1 == NULL || arr_2 == NULL)
+        return false;
+
+    if (arr_1->len != arr_2->len)
+        return false;
+
+    return memcmp(arr_1->data, arr_2->data, arr_1->len) == 0;
+}
+
+bool
+char_array_eq(const char* arr_1, const char* arr_2, size_t len) {
+    if (arr_1 == NULL && arr_2 == NULL)
+        return true;
+
+    if (arr_1 == NULL || arr_2 == NULL)
+        return false;
+
+    return memcmp(arr_1, arr_2, len) == 0;
+}
+
+gint
+mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size) {
+    if (haystack == NULL || needle == NULL) {
+        g_print("Warning: Either haystack or needle is NULL\n");
+        return -1;
+    }
+
+
+    if (needle_size == 0) return 0; /* Empty needle matches the beginning of haystack */
+    if (haystack_size < needle_size) return -1; /* Haystack is smaller than needle */
+
+    guint limit = haystack_size - needle_size;
+
+    for (guint i = 0; i <= limit; i++)
+        if (memcmp(haystack + i, needle, needle_size) == 0)
+            return (gint)i; /* Warning: Convert unsigned int to int */
+    return -1;
+}
+
+gint
+tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle) {
+
+    guint limit_bufsize = tvb_reported_length_remaining(tvb, offset);
+    guint bufsize;
+    if (max_length < 0)
+        bufsize = limit_bufsize + 1; /* 1 for the terminating nul */
+    else
+        if ((guint)max_length < limit_bufsize)
+            bufsize = (guint)max_length + 1;
+        else {
+            g_print("Warning: max_length is larger than the tvb remaining size, clip to the tvb remaining size.\n");
+            bufsize = limit_bufsize + 1;
+        }
+    char* buffer = (char*)malloc(bufsize);
+    tvb_get_raw_bytes_as_string(tvb, offset, buffer, bufsize);
+    /* Strip the terminating nul for both buffer and needle */
+    return mem_search(buffer, bufsize - 1, needle, 3);
+}
+
+gint
+tvb_find_TLS_signiture(tvbuff_t* tvb) {
+    gint min_pos = -1;
+
+    for (gint i = 0; i < TLS_SIGNUM; i++) {
+        gint pos = tvb_find_bytes(tvb, 0, -1, TLS_signiture[i]);
+        if (pos >= 0)
+            if (min_pos >= 0)
+                min_pos = min_pos <= pos ? min_pos : pos;
+            else
+                min_pos = pos;
+    }
+
+    return min_pos;
 }

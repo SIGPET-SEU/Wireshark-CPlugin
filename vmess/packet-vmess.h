@@ -13,6 +13,9 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include <glib.h>
+#include <wsutil/wsgcrypt.h>
+
 void proto_register_vmess(void);
 void proto_reg_handoff_vmess(void);
 static int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
@@ -28,11 +31,17 @@ static void vmess_keylog_reset(void);
 
 static void vmess_keylog_process_line(const char* line);
 
+/* Used to do the overall initialization. */
 static void vmess_init(void);
 
+/* Used to initialize the VMess key map. */
+static void vmess_common_init(vmess_key_map_t* km);
+
+/* Used to do the overall clean-up. */
 static void vmess_cleanup(void);
 
-static void vmess_shutdown(void);
+/* Used to clean the VMess key map. */
+static void vmess_common_clean(vmess_key_map_t* km);
 
 static void vmess_free(gpointer data);
 
@@ -65,7 +74,32 @@ static bool vmess_desegment = true; /* VMess is run atop of TCP */
 /* Keylog and decryption related variables */
 static bool vmess_decryption_supported;
 static const gchar* pref_keylog_file;
-static GHashTable* vmess_key_map; /* Structure used for recording auth, key and IV's */
+
+#define VMESS_CIPHER_CTX gcry_cipher_hd_t
+
+typedef struct {
+    GHashTable* header_key;
+    GHashTable* header_iv;
+    GHashTable* data_key;
+    GHashTable* data_iv;
+    GHashTable* response_token; // Check if the response matches the request.
+} vmess_key_map_t;
+
+typedef struct {
+    /* In this version, I decide to use GByteArray instead of StringInfo used in packet-tls-utils.h
+     * to record key/iv or other things. Since GByteArray has an intrinsic length field, it should
+     * avoid some cumbersome operations (I hope so).
+     */
+    GByteArray* write_iv;
+    VMESS_CIPHER_CTX evp;
+} VMessDecoder;
+
+typedef struct {
+    VMessDecoder data_decoder;
+    VMessDecoder header_decoder;
+} vmess_decrypt_info_t;
+
+static vmess_key_map_t vmess_key_map; /* Structure used for recording auth, key and IV's */
 /*
  * Key log file handle. Opened on demand (when keys are actually looked up),
  * closed when the capture file closes.
@@ -113,6 +147,7 @@ typedef struct _vmess_req_res_t {
 
 typedef struct _vmess_conv_t {
     streaming_reassembly_info_t* reassembly_info;
+    vmess_decrypt_info_t* vmess_decrypt_info;
     gchar* auth;
     /* Used to speed up desegmenting of chunked Transfer-Encoding. */
     wmem_map_t* chunk_offsets_fwd;

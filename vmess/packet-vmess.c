@@ -310,6 +310,20 @@ vmess_keylog_process_line(const char* line)
 
     gchar** split = g_strsplit(line, " ", 2);
     gchar * auth, * hex_auth_val;
+
+    /* We follow the keylog structure as that defined in
+     * https://tlswg.org/sslkeylogfile/draft-ietf-tls-keylogfile.html.
+     *
+     * Each line of the keylog file should follow the format:
+     * <LABEL>   <AUTH>   <SECRET>
+     * where <LABEL> MUST be one of the following:
+     * HEADER_KEY: Used to encrypt the header;
+     * HEADER_IV: Used as the nonce to encrypt the header;
+     * DATA_KEY: Used to encrypt the data;
+     * DATA_IV: Used as the nonce to encrypt the data;
+     * RESPONSE_TOKEN: Used to match VMess requests and responses.
+     */
+
     /*
      * Use wmem_xxx first, then consider g_xxx, finally seek for xxx in standard C lib.
      * See https://gitlab.com/wireshark/wireshark/-/blob/master/doc/README.wmem
@@ -363,17 +377,35 @@ void vmess_init(void)
      * Currently, the k/v of key map are all plain strings. Therefore, the built-in g_xxx
      * funtions should be enough:)
      */
-    vmess_key_map = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
+    vmess_common_init(&vmess_key_map);
     vmess_debug_flush();
+}
+
+void vmess_common_init(vmess_key_map_t* km)
+{
+    km->data_iv = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
+    km->data_key = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
+    km->header_iv = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
+    km->header_key = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
+    km->response_token = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
 }
 
 void vmess_cleanup(void)
 {
-    g_hash_table_destroy(vmess_key_map);
+    vmess_common_clean(&vmess_key_map);
     if (vmess_keylog_file) {
         fclose(vmess_keylog_file);
         vmess_keylog_file = NULL;
     }
+}
+
+void vmess_common_clean(vmess_key_map_t* km)
+{
+    g_hash_table_destroy(km->data_iv);
+    g_hash_table_destroy(km->data_key);
+    g_hash_table_destroy(km->header_iv);
+    g_hash_table_destroy(km->header_key);
+    g_hash_table_destroy(km->response_token);
 }
 
 void vmess_free(gpointer data)

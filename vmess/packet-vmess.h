@@ -332,3 +332,16 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 #define vmess_debug_print_hash_table(hash_table)
 #define vmess_debug_print_key_value(key, value, user_data)
 #endif /* VMESS_DECRYPT_DEBUG }}} */
+
+/*
+ * Write the content of a string into its hex form. For example, given the string
+ * "0102030aefbb", we convert each octet into a single byte into the target.
+ * After conversion, the result should be "\x01\x02\x03\x0a\xef\xbb".
+ *
+ * @param in    The string to be converted.
+ * @param out   The output hex-formed string.
+ * @param datalen   The length of the input string.
+ *
+ * @return  TRUE if succeeded, FALSE otherwise.
+ */
+gboolean from_hex(const char* in, GByteArray* out, guint datalen);

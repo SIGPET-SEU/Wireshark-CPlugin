@@ -541,31 +541,20 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 
 #endif
 
-/*
- * from_hex converts |hex_len| bytes of hex data from |in| and sets |*out| to
- * the result. |out->data| will be allocated using wmem_file_scope. Returns TRUE on
- * success.
- * 
- * Note that we manually add '\0' to the string end.
- */
-static gboolean from_hex(gchar** out, const gchar* in, gsize hex_len) {
-    gsize i;
-    gsize size = (hex_len / 2) * sizeof(gchar);
-
-    if (hex_len & 1)
+gboolean from_hex(const char* in, GByteArray* out, guint datalen) {
+    if (datalen & 1) /* The datalen should never be odd */
         return FALSE;
+    out->len = datalen / 2;
+    out->data = g_malloc(out->len);
+    gsize i;
 
-    //*out = (gchar*)g_malloc((hex_len / 2)*sizeof(gchar));
-    /* Manually add '\0' to the end. */
-    *out = (gchar*)wmem_alloc(wmem_file_scope(), size + 1);
-    for (i = 0; i < size; i++) {
-        int a = ws_xton(in[i * 2]);
-        int b = ws_xton(in[i * 2 + 1]);
+    for (i = 0; i < datalen; i += 2) {
+        char a, b;
+        a = ws_xton(in[i]), b = ws_xton(in[i + 1]);
         if (a == -1 || b == -1)
             return FALSE;
-        (*out)[i] = a << 4 | b; /* NOTE: Bracket-ref [] is prior to dereference * */
+        out->data[i / 2] = (guint8)(a << 4 | b);
     }
-    (*out)[i] = '\0';
     return TRUE;
 }
 

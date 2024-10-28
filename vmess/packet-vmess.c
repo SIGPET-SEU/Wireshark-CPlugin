@@ -246,7 +246,7 @@ vmess_keylog_read(void) {
     if (vmess_keylog_file && file_needs_reopen(ws_fileno(vmess_keylog_file), pref_keylog_file)) {
         ws_debug("Key log file got changed or deleted, trying to re-open.");
         vmess_keylog_reset();
-        g_hash_table_remove_all(vmess_key_map);
+        vmess_keylog_remove(&vmess_key_map);
     }
 
     if (!vmess_keylog_file) {
@@ -258,58 +258,51 @@ vmess_keylog_read(void) {
         ws_debug("Opened key log file %s", pref_keylog_file);
     }
 
-    /*
-     *
-     * File format: each line of the keylog file follows the format
-     * 
-     * <TYPE> <VALUE>
-     *
-     * currently, only AUTH type is supported. The value is a 16-byte string.
-     *
-     */
-
     for (;;) {
-        char buf[512];
-        if (!fgets(buf, sizeof(buf), vmess_keylog_file)) {
+        char buf[512], *line;
+        line = fgets(buf, sizeof(buf), vmess_keylog_file);
+        if (!line) {
             if (feof(vmess_keylog_file)) {
                 clearerr(vmess_keylog_file);
                 /* For debugging, print the key map table. */
-#define VMESS_DEBUG_PRINT_KEY_MAP
+//#define VMESS_DEBUG_PRINT_KEY_MAP
 #ifdef VMESS_DEBUG_PRINT_KEY_MAP
-                vmess_debug_print_hash_table(vmess_key_map);
+                //vmess_debug_print_hash_table(vmess_key_map);
 #endif // VMESS_DEBUG_PRINT_KEY_MAP
             }
             else if (ferror(vmess_keylog_file)) {
                 ws_debug("Error while reading %s, closing it.", pref_keylog_file);
                 vmess_keylog_reset();
-                g_hash_table_remove_all(vmess_key_map);
+                vmess_keylog_remove(&vmess_key_map);
             }
             break;
         }
 
         /* Strip '\n' and '\r' chars from lines. */
-        size_t len = strlen(buf);
-        while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n')) { len -= 1; buf[len] = 0; }
+        /*size_t len = strlen(buf);
+        while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n')) { len -= 1; buf[len] = 0; }*/
 
-        vmess_keylog_process_line((const guint8*)buf);
+        vmess_keylog_process_line((const guint8*)line, strlen(line), &vmess_key_map);
     }
 
 }
 
 static void
-vmess_keylog_process_line(const char* line)
+vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km)
 {
-    ws_noisy("vmess process line: %s", line);
+    ws_noisy("vmess process line: %s", data);
 
-    /* Check if this line is the header of keylog file, i.e.,
-     * the line starts with #
-     */
+    vmess_key_match_group_t km_group[] = {
+        {"header_key", km->header_key},
+        {"header_iv", km->header_iv},
+        {"data_key", km->data_key},
+        {"data_iv", km->data_iv},
+        {"response_token", km->response_token}
+    };
 
-    if (strlen(line) > 0 && line[0] == '#')
+    GRegex* regex = vmess_compile_keyfile_regex();
+    if (!regex)
         return;
-
-    gchar** split = g_strsplit(line, " ", 2);
-    gchar * auth, * hex_auth_val;
 
     /* We follow the keylog structure as that defined in
      * https://tlswg.org/sslkeylogfile/draft-ietf-tls-keylogfile.html.
@@ -332,34 +325,101 @@ vmess_keylog_process_line(const char* line)
      * memory allocated by g_malloc should be freed using g_free.
      * Otherwise, it may cause Access Violation Reading exception.
      */
-    gchar* key = wmem_strdup(wmem_file_scope(), "Dummy");
-    
-    size_t auth_len;
 
-    if (g_strv_length(split) == 2) {
-        // Auth file format: [key type] [hex-encoded key material]
-        auth = split[0];
-        hex_auth_val = split[1];
+    /* Strip possible newline characters, e.g., '\r', '\n'. */
+    const char* next_line = (const char*)data;
+    const char* line_end = next_line + datalen;
+    const char* line = next_line;
+    next_line = (const char*)memchr(line, '\n', line_end - line);
+    gssize linelen;
+
+    if (next_line) {
+        linelen = next_line - line;
+        next_line++;    /* drop LF */
     }
     else {
-        vmess_debug_printf("vmess keylog: invalid format");
-        g_strfreev(split);
-        return;
+        linelen = (gssize)(line_end - line);
+    }
+    if (linelen > 0 && line[linelen - 1] == '\r') {
+        linelen--;      /* drop CR */
     }
 
-    gchar* auth_val = NULL;
+    GMatchInfo* mi;
+    gboolean result = g_regex_match_full(regex, line, linelen, 0, G_REGEX_MATCH_ANCHORED, &mi, NULL);
+    if (result) {
+        /* Note that the secret read in is in plaintext form, it should be converted into hex form later. */
+        gchar* hex_secret;
+        gchar* auth;
+        GByteArray* secret = g_byte_array_new(); /* We use byte array to store the hex-formed secrets. */
+        GHashTable* ht = NULL;
 
-    from_hex(&auth_val, hex_auth_val, strlen(hex_auth_val));
+        hex_secret = g_match_info_fetch_named(mi, "secret");
 
-    g_hash_table_insert(vmess_key_map, auth_val, key);
+        /* G_N_ELEMENTS counts the number of entries in a static initialized array,
+         * by computing sizeof(arr)/sizeof(arr[0]). Therefore, calling this macro
+         * on a dynamically allocated array gives an incorrect answer.
+         */
+        for (int i = 0; i < G_N_ELEMENTS(km_group); i++) {
+            vmess_key_match_group_t* g = &km_group[i];
+            auth = g_match_info_fetch_named(mi, g->re_group_name);
+            if (auth && *auth) {
+                ht = g->key_ht;
+                from_hex(hex_secret, secret, strlen(hex_secret));
+                g_free(hex_secret);
+                break;
+            }
+        }
+        g_hash_table_insert(ht, auth, secret);
+    }
+    else if (linelen > 0 && line[0] != '#') {
+        return; /* In VMess dissection, here one should raise some exception. */
+    }
+    /* always free match info even if there is no match. */
+    g_match_info_free(mi);
+}
 
-    g_strfreev(split);
+GRegex* vmess_compile_keyfile_regex()
+{
+#define OCTET "(?:[[:xdigit:]]{2})"
+    const gchar* pattern =
+        "(?:"
+        /* VMess AUTH to Derived Secrets mapping. */
+        "HEADER_KEY (?<header_key>" OCTET "{16})"
+        "|HEADER_IV (?<header_iv>" OCTET "{16})"
+        "|DATA_KEY (?<data_key>" OCTET "{16})"
+        "|DATA_IV (?<data_iv>" OCTET "{16})"
+        "|RESPONSE_TOKEN (?<response_token>" OCTET "{16})"
+        ") (?<secret>" OCTET "+)";
+#undef OCTET
+    static GRegex* regex = NULL;
+    GError* gerr = NULL;
+    if (!regex) {
+        regex = g_regex_new(pattern,
+            (GRegexCompileFlags)(G_REGEX_OPTIMIZE | G_REGEX_ANCHORED | G_REGEX_RAW),
+            G_REGEX_MATCH_ANCHORED, &gerr);
+        if (gerr) {
+            g_print("%s failed to compile regex: %s\n", G_STRFUNC,
+                gerr->message);
+            g_error_free(gerr);
+            regex = NULL;
+        }
+    }
+    return regex;
 }
 
 
 static gboolean
 vmess_decrypt_init(void) {
     return TRUE;
+}
+
+void vmess_keylog_remove(vmess_key_map_t* mk)
+{
+    g_hash_table_remove_all(mk->data_iv);
+    g_hash_table_remove_all(mk->data_key);
+    g_hash_table_remove_all(mk->header_iv);
+    g_hash_table_remove_all(mk->header_key);
+    g_hash_table_remove_all(mk->response_token);
 }
 
 static void

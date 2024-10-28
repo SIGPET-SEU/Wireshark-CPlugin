@@ -22,14 +22,7 @@ static int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* 
 static int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static void vmess_keylog_read(void);
 
-/*
- * Reset the keylog file.
- */
-static void vmess_keylog_reset(void);
-
-static void vmess_keylog_process_line(const char* line);
 
 /* Used to do the overall initialization. */
 static void vmess_init(void);
@@ -44,11 +37,6 @@ static void vmess_cleanup(void);
 static void vmess_common_clean(vmess_key_map_t* km);
 
 static void vmess_free(gpointer data);
-
-/*
- * Must be called before attempting decryption.
- */
-static gboolean vmess_decrypt_init(void);
 
 static dissector_handle_t vmess_handle;
 static dissector_handle_t tls_handle;
@@ -71,7 +59,9 @@ static char* TLS_signiture[TLS_SIGNUM] = {
 
 static bool vmess_desegment = true; /* VMess is run atop of TCP */
 
-/* Keylog and decryption related variables */
+
+
+/* Keylog and decryption related variables and routines */
 static bool vmess_decryption_supported;
 static const gchar* pref_keylog_file;
 
@@ -85,12 +75,24 @@ typedef struct {
     GHashTable* response_token; // Check if the response matches the request.
 } vmess_key_map_t;
 
+typedef enum {
+    MODE_NONE,      /* No encryption, for debug only */
+    MODE_CFB,       /* CFB mode */
+    MODE_GCM,       /* GenericAEADCipher */
+    MODE_POLY1305,  /* AEAD_CHACHA20_POLY1305 with 16 byte auth tag (RFC 7905) */
+} vmess_cipher_mode_t;
+
+typedef struct _VMessCipherSuite {
+    vmess_cipher_mode_t mode;
+} VMessCipherSuite;
+
 typedef struct {
     /* In this version, I decide to use GByteArray instead of StringInfo used in packet-tls-utils.h
      * to record key/iv or other things. Since GByteArray has an intrinsic length field, it should
      * avoid some cumbersome operations (I hope so).
      */
-    GByteArray* write_iv;
+    GByteArray write_iv;
+    const VMessCipherSuite* cipher_suite;
     VMESS_CIPHER_CTX evp;
 } VMessDecoder;
 
@@ -100,11 +102,41 @@ typedef struct {
 } vmess_decrypt_info_t;
 
 static vmess_key_map_t vmess_key_map; /* Structure used for recording auth, key and IV's */
+
+typedef struct vmess_master_key_match_group {
+    const char* re_group_name;
+    GHashTable* key_ht;
+} vmess_key_match_group_t;
+
 /*
  * Key log file handle. Opened on demand (when keys are actually looked up),
  * closed when the capture file closes.
  */
 static FILE* vmess_keylog_file;
+
+/* Routines */
+
+static void vmess_keylog_read(const gchar* vmess_keylog_filename, FILE** keylog_file,
+    const vmess_key_map_t* km);
+
+/* Remove all entries for each table in the key map. */
+static void vmess_keylog_remove(vmess_key_map_t* mk);
+
+/*
+ * Reset the keylog file.
+ */
+static void vmess_keylog_reset(void);
+
+static void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km);
+
+static GRegex* vmess_compile_keyfile_regex();
+
+/*
+ * Must be called before attempting decryption.
+ */
+static gboolean vmess_decrypt_init(void);
+
+
 
 
 /*

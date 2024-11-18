@@ -17,6 +17,8 @@ gint tvb_find_crlf_pos(tvbuff_t* tvb);
 gint tvb_find_TLS_signiture(tvbuff_t* tvb);
 gint tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle);
 gint mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size);
+bool is_trojan_request(tvbuff_t* tvb);
+bool is_trojan_response(tvbuff_t* tvb);
 
 /****************Trojan Utils Function End******************/
 
@@ -32,6 +34,9 @@ static dissector_handle_t trojan_handle;
 static dissector_handle_t tls_handle;
 static dissector_handle_t h2_handle;
 static dissector_handle_t http_handle;
+static heur_dissector_list_t tls_heur_subdissector_list;
+static heur_dtbl_entry_t *heur_dtbl_entry;
+
 
 const char* TROJAN_CRLF = "\x0d\x0a";
 

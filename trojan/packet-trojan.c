@@ -1,8 +1,13 @@
 #include "config.h"
 
 #include <epan/packet.h>
+#include <epan/proto_data.h>
 #include <glib.h>
 #include <epan/wmem_scopes.h>
+#include <epan/conversation.h>
+#include <epan/dissectors/packet-tls.h>
+#include <epan/dissectors/packet-tls-utils.h>
+
 #include "packet-trojan.h"
 
 static int
@@ -10,16 +15,24 @@ dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
     proto_item* ti;
     proto_tree* trojan_tree;
     tvbuff_t* next_tvb;
+    port_type save_port_type;
+    uint16_t save_can_desegment;
     int ret;
+    // conversation_t* conversation;
+
+
     
-    //printf("--dissect_trojan_response\n");
-    //printf("----pinfo->curr_layer_num: %d -----call tls_handle \n",pinfo->curr_layer_num);
+    printf("--dissect_trojan_response\n");
+    printf("----pinfo->curr_layer_num: %d -----call tls_handle \n",pinfo->curr_layer_num);
+    // printf("----pinfo->ptype: %d\n", pinfo->ptype); //全是 PT_TCP
 
-    port_type save_port_type = pinfo->ptype;
-    uint16_t saved_can_desegment = pinfo->saved_can_desegment;
-
+    save_port_type = pinfo->ptype;
+    save_can_desegment = pinfo->can_desegment;
     pinfo->ptype = PT_NONE;
-    pinfo->can_desegment = 2;
+    pinfo->can_desegment = pinfo->saved_can_desegment;
+
+    // conversation = find_or_create_conversation(pinfo);
+    // conversation_set_dissector(conversation, trojan_handle);
 
     col_set_str(pinfo->cinfo, COL_INFO, "Trojan Response & call tls_handle");
     ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, -1, ENC_NA);
@@ -39,7 +52,7 @@ dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
     dissector_delete_string("http.upgrade", "h2c", h2_handle);
 
     pinfo->ptype = save_port_type;
-    pinfo->can_desegment = saved_can_desegment;
+    pinfo->can_desegment = save_can_desegment;
 
     return ret;
 }
@@ -49,11 +62,18 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
     proto_item* ti;
     proto_tree* trojan_tree;
     int offset = 0, second_crlf_pos;
+    // conversation_t* conversation;
 
-    // printf("--dissect_trojan_request\n");
-    // printf("----pinfo->curr_layer_num = %d\n", pinfo->curr_layer_num);
+
+     printf("--dissect_trojan_request\n");
+     printf("----pinfo->curr_layer_num = %d\n", pinfo->curr_layer_num);
+
 
     col_set_str(pinfo->cinfo, COL_INFO, "Trojan Request");
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "Trojan");
+
+    // conversation = find_or_create_conversation(pinfo);
+
     ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, -1, ENC_NA);
     trojan_tree = proto_item_add_subtree(ti, ett_trojan);
     proto_tree_add_item(trojan_tree, hf_trojan_password, tvb, offset, TROJAN_PASSWORD_LENGTH, ENC_BIG_ENDIAN);
@@ -72,67 +92,69 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
     }
 
     // todo: 后面还有数据吗?
+
+    // return offset + second_crlf_pos + TROJAN_CRLF_LENGTH; // 
     
-    // return offset + second_crlf_pos + TROJAN_CRLF_LENGTH;
     return tvb_captured_length(tvb);
 }
 
 static int
 dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
 
+    struct tlsinfo* tlsinfo = (struct tlsinfo*)data;
+    //dissector_handle_t save_handle = *(tlsinfo->app_handle);
 
-    //printf("dissect_trojan  pinfo->Frame number: %d, 4bytes: %s\n",
-    //    pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STR_HEX));
+    printf("dissect_trojan  pinfo->Frame number: %d, 4bytes: %s\n",
+        pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STRING));
 
     /* trojan request packet */
-    if (tvb_reported_length(tvb) > TROJAN_PASSWORD_LENGTH && tvb_reported_length(tvb) < TROJAN_REQUEST_MAX_LENGTH) { /* Trojan request length */
-        gchar* tmp_crlf = (gchar*)g_malloc((TROJAN_CRLF_LENGTH + 1) * sizeof(gchar));
-        tvb_get_raw_bytes_as_string(tvb, TROJAN_PASSWORD_LENGTH, tmp_crlf, (TROJAN_CRLF_LENGTH + 1));
-        if (char_array_eq(TROJAN_CRLF, tmp_crlf, TROJAN_CRLF_LENGTH)) {
-            g_free(tmp_crlf);
-            return dissect_trojan_request(tvb, pinfo, tree, data);
-        }
-        g_free(tmp_crlf);
+    if (is_trojan_request(tvb)) {
+        //*(tlsinfo->app_handle) = trojan_handle;
+        return dissect_trojan_request(tvb, pinfo, tree, data);
     }
 
-    /* trojan response tunnel data packet */
-    if (tvb_find_TLS_signiture(tvb) == 0) {
+    /* trojan response(tunnel data) packet */
+    if (is_trojan_response(tvb)) {
+        //*(tlsinfo->app_handle) = trojan_handle;
         return dissect_trojan_response(tvb, pinfo, tree, data);
     }
 
     /* not trojan packet */
+    //*(tlsinfo->app_handle) = save_handle;
+    
+    // 尝试其他常见协议
+    if (dissector_try_heuristic(tls_heur_subdissector_list, tvb, pinfo, tree, &heur_dtbl_entry, data)) {
+        // 打印被成功调用的启发器的名字
+        printf("Successful heuristic dissector: %s\n", heur_dtbl_entry->short_name);
+        return tvb_captured_length(tvb);
+    }
+
 
     printf("【Waring】: Cannot be parsed by trojan dissect\n");
 
-    return tvb_captured_length(tvb);
+    // return call_dissector_with_data(http_handle, tvb, pinfo, tree, data); // 
+    return call_data_dissector(tvb, pinfo, tree);
 }
 
 static bool
 dissect_trojan_heur_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, void* data) {
 
-    //printf("dissect_trojan_heur_tls  pinfo->Frame number: %d, 4bytes: %s\n",
-    //    pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STR_HEX));
+    conversation_t* conversation;
+    struct tlsinfo* tlsinfo = (struct tlsinfo*)data;
+    printf("【Info Frame number %d】：dissect_trojan_heur_tls, 4bytes: %s \n", pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STRING));
 
-    /* trojan request packet */
-    if (tvb_reported_length(tvb) > TROJAN_PASSWORD_LENGTH && tvb_reported_length(tvb) < TROJAN_REQUEST_MAX_LENGTH) { /* Minimum Trojan request length */
-        gchar* tmp_crlf = (gchar*)g_malloc((TROJAN_CRLF_LENGTH + 1) * sizeof(gchar));
-        tvb_get_raw_bytes_as_string(tvb, TROJAN_PASSWORD_LENGTH, tmp_crlf, (TROJAN_CRLF_LENGTH + 1));
-        if (char_array_eq(TROJAN_CRLF, tmp_crlf, TROJAN_CRLF_LENGTH)) {
-            dissect_trojan(tvb, pinfo, tree, data);
-            g_free(tmp_crlf);
-            return true;
-        }
-        g_free(tmp_crlf);
-    }
-
-    /* trojan response tunnel data packet */
-    if (tvb_find_TLS_signiture(tvb) == 0) {
+    /* found trojan request or response(tunnel data) */
+    if (is_trojan_request(tvb) || is_trojan_response(tvb)) {
+        conversation = find_or_create_conversation(pinfo);
+        //conversation_set_dissector(conversation, trojan_handle); // conversation_get_dissector()
         dissect_trojan(tvb, pinfo, tree, data);
+        //*(tlsinfo->app_handle) = trojan_handle;
         return true;
     }
 
     /* not trojan packet */
     printf("【Info Frame number %d】：dissect_trojan_heur_tls return false\n", pinfo->num);
+
     return false;
 }
 
@@ -140,14 +162,17 @@ void
 proto_reg_handoff_trojan(void)
 {
 
-    // trojan_handle = create_dissector_handle(dissect_trojan, proto_trojan); /* 创建一个匿名解析器，不建议使用 */
     tls_handle = find_dissector("tls");
     h2_handle = find_dissector("http2");
     http_handle = find_dissector("http");
     dissector_add_uint("tls.port", TROJAN_TLS_PORT, trojan_handle);
+    // dissector_add_for_decode_as("trojan", trojan_handle); // ui
 
-    // 添加子解析器: tls解析后调用dissect_trojan_heur_tls函数，在决定是否调用trojan解析器
-    heur_dissector_add("tls", dissect_trojan_heur_tls, "Trojan Over Tls", "trojan_over_tls", proto_trojan, 1);
+    /* 将 trojan 注册到 tls 的启发式解析器中 */
+    heur_dissector_add("tls", dissect_trojan_heur_tls, "Trojan Over Tls", "trojan_over_tls", proto_trojan, HEURISTIC_ENABLE);
+
+    tls_heur_subdissector_list = find_heur_dissector_list("tls"); // tls 的启发式解析器列表
+
 
 }
 
@@ -218,7 +243,7 @@ proto_register_trojan(void)
 }
 
 
-/* utils function */
+/* utils functions */
 bool
 char_array_eq(const char* arr_1, const char* arr_2, size_t len) {
 
@@ -306,4 +331,25 @@ mem_search(const char* haystack, guint haystack_size, const char* needle, guint 
         if (memcmp(haystack + i, needle, needle_size) == 0)
             return (gint)i; /* Warning: Convert unsigned int to int */
     return -1;
+}
+
+bool
+is_trojan_request(tvbuff_t* tvb) {
+    /* trojan request packet */
+    if (tvb_reported_length(tvb) > TROJAN_PASSWORD_LENGTH && tvb_reported_length(tvb) < TROJAN_REQUEST_MAX_LENGTH) { /* Minimum Trojan request length */
+        gchar* tmp_crlf = (gchar*)g_malloc((TROJAN_CRLF_LENGTH + 1) * sizeof(gchar));
+        tvb_get_raw_bytes_as_string(tvb, TROJAN_PASSWORD_LENGTH, tmp_crlf, (TROJAN_CRLF_LENGTH + 1));
+        if (char_array_eq(TROJAN_CRLF, tmp_crlf, TROJAN_CRLF_LENGTH)) {
+            g_free(tmp_crlf);
+            return true;
+        }
+        g_free(tmp_crlf);
+    }
+
+    return false;
+}
+
+bool
+is_trojan_response(tvbuff_t* tvb) {
+    return tvb_find_TLS_signiture(tvb) == 0 ? true : false;
 }

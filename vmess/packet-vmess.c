@@ -29,7 +29,6 @@
 #include <wsutil/file_util.h>
 #include <wsutil/wslog.h>
 #include <string.h>
-#include <glib.h>
 #include "packet-vmess.h"
 
 static int
@@ -182,7 +181,7 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
-        gchar* key = g_hash_table_lookup(vmess_key_map, tmp_auth);
+        gchar* key = g_hash_table_lookup(vmess_key_map.header_key, tmp_auth);
         if (key) {
             if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { 
                 conv_data->auth = wmem_strndup(wmem_file_scope(), tmp_auth, VMESS_AUTH_LENGTH);
@@ -350,7 +349,7 @@ vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_
         /* Note that the secret read in is in plaintext form, it should be converted into hex form later. */
         gchar* hex_secret;
         gchar* auth;
-        GByteArray* secret = g_byte_array_new(); /* We use byte array to store the hex-formed secrets. */
+        GByteArray* secret = wmem_new(wmem_file_scope(), GByteArray); /* We use byte array to store the hex-formed secrets. */
         GHashTable* ht = NULL;
 
         hex_secret = g_match_info_fetch_named(mi, "secret");
@@ -431,6 +430,16 @@ vmess_keylog_reset(void)
     }
 }
 
+void vmess_common_init(vmess_key_map_t* km)
+{
+    // Use wmem to manage memory, instead of using g_free.
+    km->data_iv = g_hash_table_new(g_str_hash, g_str_equal);
+    km->data_key = g_hash_table_new(g_str_hash, g_str_equal);
+    km->header_iv = g_hash_table_new(g_str_hash, g_str_equal);
+    km->header_key = g_hash_table_new(g_str_hash, g_str_equal);
+    km->response_token = g_hash_table_new(g_str_hash, g_str_equal);
+}
+
 void vmess_init(void)
 {
     /* Allocate memory for key map, refer to packet-tls.c for a more complex key map management.
@@ -441,13 +450,13 @@ void vmess_init(void)
     vmess_debug_flush();
 }
 
-void vmess_common_init(vmess_key_map_t* km)
+void vmess_common_clean(vmess_key_map_t* km)
 {
-    km->data_iv = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
-    km->data_key = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
-    km->header_iv = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
-    km->header_key = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
-    km->response_token = g_hash_table_new_full(g_str_hash, g_str_equal, vmess_free, vmess_free);
+    g_hash_table_destroy(km->data_iv);
+    g_hash_table_destroy(km->data_key);
+    g_hash_table_destroy(km->header_iv);
+    g_hash_table_destroy(km->header_key);
+    g_hash_table_destroy(km->response_token);
 }
 
 void vmess_cleanup(void)
@@ -457,15 +466,6 @@ void vmess_cleanup(void)
         fclose(vmess_keylog_file);
         vmess_keylog_file = NULL;
     }
-}
-
-void vmess_common_clean(vmess_key_map_t* km)
-{
-    g_hash_table_destroy(km->data_iv);
-    g_hash_table_destroy(km->data_key);
-    g_hash_table_destroy(km->header_iv);
-    g_hash_table_destroy(km->header_key);
-    g_hash_table_destroy(km->response_token);
 }
 
 void vmess_free(gpointer data)
@@ -545,7 +545,7 @@ gboolean from_hex(const char* in, GByteArray* out, guint datalen) {
     if (datalen & 1) /* The datalen should never be odd */
         return FALSE;
     out->len = datalen / 2;
-    out->data = g_malloc(out->len);
+    out->data = (guchar*)wmem_alloc(wmem_file_scope(), datalen / 2);
     gsize i;
 
     for (i = 0; i < datalen; i += 2) {

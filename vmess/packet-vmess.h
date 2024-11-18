@@ -14,7 +14,7 @@
  */
 
 #include <glib.h>
-#include <wsutil/wsgcrypt.h>
+#include <gcrypt.h>
 
 void proto_register_vmess(void);
 void proto_reg_handoff_vmess(void);
@@ -27,14 +27,9 @@ static int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_
 /* Used to do the overall initialization. */
 static void vmess_init(void);
 
-/* Used to initialize the VMess key map. */
-static void vmess_common_init(vmess_key_map_t* km);
 
 /* Used to do the overall clean-up. */
 static void vmess_cleanup(void);
-
-/* Used to clean the VMess key map. */
-static void vmess_common_clean(vmess_key_map_t* km);
 
 static void vmess_free(gpointer data);
 
@@ -67,13 +62,19 @@ static const gchar* pref_keylog_file;
 
 #define VMESS_CIPHER_CTX gcry_cipher_hd_t
 
-typedef struct {
+typedef struct _vmess_key_map_t {
     GHashTable* header_key;
     GHashTable* header_iv;
     GHashTable* data_key;
     GHashTable* data_iv;
     GHashTable* response_token; // Check if the response matches the request.
 } vmess_key_map_t;
+
+/* Used to clean the VMess key map. */
+static void vmess_common_clean(vmess_key_map_t* km);
+
+/* Used to initialize the VMess key map. */
+static void vmess_common_init(vmess_key_map_t* km);
 
 typedef enum {
     MODE_NONE,      /* No encryption, for debug only */
@@ -116,8 +117,9 @@ static FILE* vmess_keylog_file;
 
 /* Routines */
 
-static void vmess_keylog_read(const gchar* vmess_keylog_filename, FILE** keylog_file,
-    const vmess_key_map_t* km);
+//static void vmess_keylog_read(const gchar* vmess_keylog_filename, FILE** keylog_file,
+//    const vmess_key_map_t* km);
+static void vmess_keylog_read(void);
 
 /* Remove all entries for each table in the key map. */
 static void vmess_keylog_remove(vmess_key_map_t* mk);
@@ -136,6 +138,9 @@ static GRegex* vmess_compile_keyfile_regex();
  */
 static gboolean vmess_decrypt_init(void);
 
+/**
+ * Since VMess auth is 16-byte long, we could split the auth into 4-byte long and hash.
+ */
 
 
 

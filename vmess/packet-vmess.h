@@ -350,3 +350,11 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
  * @return  TRUE if succeeded, FALSE otherwise.
  */
 gboolean from_hex(const char* in, GByteArray* out, guint datalen);
+
+/**
+ * This is the raw char* version of from_hex, used for handling the raw bytes
+ * read from tvb, where looking up the GHashMap with GByteArray would be cumbersome.
+ * 
+ * NOTE that the caller is responsbile for memory allocattion with reasonable size.
+ */
+gboolean from_hex_raw(const char* in, gchar * out, guint datalen);

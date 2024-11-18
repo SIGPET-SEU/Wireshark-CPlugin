@@ -181,7 +181,7 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
-        gchar* key = g_hash_table_lookup(vmess_key_map.header_key, tmp_auth);
+        GByteArray* key = (GByteArray *)g_hash_table_lookup(vmess_key_map.header_key, tmp_auth);
         if (key) {
             if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { 
                 conv_data->auth = wmem_strndup(wmem_file_scope(), tmp_auth, VMESS_AUTH_LENGTH);
@@ -348,7 +348,8 @@ vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_
     if (result) {
         /* Note that the secret read in is in plaintext form, it should be converted into hex form later. */
         gchar* hex_secret;
-        gchar* auth;
+        gchar* hex_auth;
+        gchar* auth = wmem_alloc(wmem_file_scope(), VMESS_AUTH_LENGTH + 1);
         GByteArray* secret = wmem_new(wmem_file_scope(), GByteArray); /* We use byte array to store the hex-formed secrets. */
         GHashTable* ht = NULL;
 
@@ -360,10 +361,12 @@ vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_
          */
         for (int i = 0; i < G_N_ELEMENTS(km_group); i++) {
             vmess_key_match_group_t* g = &km_group[i];
-            auth = g_match_info_fetch_named(mi, g->re_group_name);
-            if (auth && *auth) {
+            hex_auth = g_match_info_fetch_named(mi, g->re_group_name);
+            if (hex_auth && *hex_auth) {
                 ht = g->key_ht;
+                from_hex_raw(hex_auth, auth, strlen(hex_auth));
                 from_hex(hex_secret, secret, strlen(hex_secret));
+                g_free(hex_auth);
                 g_free(hex_secret);
                 break;
             }
@@ -555,6 +558,23 @@ gboolean from_hex(const char* in, GByteArray* out, guint datalen) {
             return FALSE;
         out->data[i / 2] = (guint8)(a << 4 | b);
     }
+    return TRUE;
+}
+
+gboolean from_hex_raw(const char* in, gchar * out, guint datalen)
+{
+    if (datalen & 1) /* The datalen should never be odd */
+        return FALSE;
+    gsize i;
+
+    for (i = 0; i < datalen; i += 2) {
+        char a, b;
+        a = ws_xton(in[i]), b = ws_xton(in[i + 1]);
+        if (a == -1 || b == -1)
+            return FALSE;
+        out[i / 2] = (guint8)(a << 4 | b);
+    }
+    out[datalen / 2 + 1] = '\0';
     return TRUE;
 }
 

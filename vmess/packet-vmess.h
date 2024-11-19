@@ -18,47 +18,31 @@
 
 void proto_register_vmess(void);
 void proto_reg_handoff_vmess(void);
-static int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 
 
 /* Used to do the overall initialization. */
-static void vmess_init(void);
+void vmess_init(void);
 
 
 /* Used to do the overall clean-up. */
-static void vmess_cleanup(void);
+void vmess_cleanup(void);
 
-static void vmess_free(gpointer data);
+void vmess_free(gpointer data);
 
-static dissector_handle_t vmess_handle;
-static dissector_handle_t tls_handle;
-static dissector_handle_t vmess_request_handle;
+
 
 #define TLS_SIGNUM (gint)5 /* The number of TLS record types. */
-
-static char* TLS_signiture[TLS_SIGNUM] = {
-    "\x14\x03\x03", /* Change Cipher Spec */
-    "\x15\x03\x03", /* Alert */
-    "\x16\x03\x03", /* Handshake */
-    "\x16\x03\x01", /* Handshake Legacy */
-    "\x17\x03\x03"  /* Application Data */
-};
 
 #define VMESS_PROTO_DATA_REQRES	0
 #define VMESS_PROTO_DATA_INFO	1
 
 #define VMESS_TCP_PORT 20332 /* Not IANA registed */
 
-static bool vmess_desegment = true; /* VMess is run atop of TCP */
 
-
-
-/* Keylog and decryption related variables and routines */
-static bool vmess_decryption_supported;
-static const gchar* pref_keylog_file;
 
 #define VMESS_CIPHER_CTX gcry_cipher_hd_t
 
@@ -102,41 +86,33 @@ typedef struct {
     VMessDecoder header_decoder;
 } vmess_decrypt_info_t;
 
-static vmess_key_map_t vmess_key_map; /* Structure used for recording auth, key and IV's */
-
 typedef struct vmess_master_key_match_group {
     const char* re_group_name;
     GHashTable* key_ht;
 } vmess_key_match_group_t;
 
-/*
- * Key log file handle. Opened on demand (when keys are actually looked up),
- * closed when the capture file closes.
- */
-static FILE* vmess_keylog_file;
+
 
 /* Routines */
 
 //static void vmess_keylog_read(const gchar* vmess_keylog_filename, FILE** keylog_file,
 //    const vmess_key_map_t* km);
-static void vmess_keylog_read(void);
+void vmess_keylog_read(void);
 
 /* Remove all entries for each table in the key map. */
-static void vmess_keylog_remove(vmess_key_map_t* mk);
+void vmess_keylog_remove(vmess_key_map_t* mk);
 
 /*
  * Reset the keylog file.
  */
-static void vmess_keylog_reset(void);
+void vmess_keylog_reset(void);
 
-static void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km);
-
-static GRegex* vmess_compile_keyfile_regex();
+void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km);
 
 /*
  * Must be called before attempting decryption.
  */
-static gboolean vmess_decrypt_init(void);
+gboolean vmess_decrypt_init(void);
 
 /**
  * Since VMess auth is 16-byte long, we could split the auth into 4-byte long and hash.
@@ -158,7 +134,7 @@ static gboolean vmess_decrypt_init(void);
 // reassembly table for streaming chunk mode
 static reassembly_table proto_vmess_streaming_reassembly_table;
 
-static int proto_vmess;
+
 
 /** information about a request and response on a VMess conversation. */
 typedef struct _vmess_req_res_t {
@@ -183,6 +159,9 @@ typedef struct _vmess_req_res_t {
 } vmess_req_res_t;
 
 typedef struct _vmess_conv_t {
+    gboolean req_decrypted;     /* Used to check if the VMess header is decrypted */
+    gboolean data_decrypted;    /* Used to check if the Data is decrypted */
+    gboolean resp_decrypted;    /* Used to check if the Response Header is decrypted */
     streaming_reassembly_info_t* reassembly_info;
     vmess_decrypt_info_t* vmess_decrypt_info;
     gchar* auth;
@@ -239,49 +218,6 @@ typedef struct {
     vmess_streaming_reassembly_data_t* res_streaming_reassembly_data;
 } vmess_req_res_private_data_t;
 
-
-/****************VMess Fields******************/
-static int hf_vmess_request_auth;
-static int hf_vmess_response_header;
-static int hf_vmess_payload_length;
-
-// heads for displaying reassembly information
-static int hf_msg_fragments;
-static int hf_msg_fragment;
-static int hf_msg_fragment_overlap;
-static int hf_msg_fragment_overlap_conflicts;
-static int hf_msg_fragment_multiple_tails;
-static int hf_msg_fragment_too_long_fragment;
-static int hf_msg_fragment_error;
-static int hf_msg_fragment_count;
-static int hf_msg_reassembled_in;
-static int hf_msg_reassembled_length;
-static int hf_msg_body_segment;
-/**************VMess Fields End****************/
-
-/**************VMess ETT Fileds****************/
-
-static int ett_vmess;
-
-static gint ett_msg_fragment;
-static gint ett_msg_fragments;
-
-/************VMess ETT Fileds End**************/
-
-static const fragment_items msg_frag_items = {
-    &ett_msg_fragment,
-    &ett_msg_fragments,
-    &hf_msg_fragments,
-    &hf_msg_fragment,
-    &hf_msg_fragment_overlap,
-    &hf_msg_fragment_overlap_conflicts,
-    &hf_msg_fragment_multiple_tails,
-    &hf_msg_fragment_too_long_fragment,
-    &hf_msg_fragment_error,
-    &hf_msg_fragment_count,
-    &hf_msg_reassembled_in,
-    &hf_msg_reassembled_length,
- };
 
 /* Some util functions */
 bool gbytearray_eq(const GByteArray*, const GByteArray*);

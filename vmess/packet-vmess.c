@@ -31,24 +31,100 @@
 #include <string.h>
 #include "packet-vmess.h"
 
-static int
-dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+/*
+ * Key log file handle. Opened on demand (when keys are actually looked up),
+ * closed when the capture file closes.
+ */
+static FILE* vmess_keylog_file;
+static vmess_key_map_t vmess_key_map; /* Structure used for recording auth, key and IV's */
+
+static dissector_handle_t vmess_handle;
+static dissector_handle_t tls_handle;
+static dissector_handle_t vmess_request_handle;
+
+static char* TLS_signiture[TLS_SIGNUM] = {
+    "\x14\x03\x03", /* Change Cipher Spec */
+    "\x15\x03\x03", /* Alert */
+    "\x16\x03\x03", /* Handshake */
+    "\x16\x03\x01", /* Handshake Legacy */
+    "\x17\x03\x03"  /* Application Data */
+};
+
+static bool vmess_desegment = true; /* VMess is run atop of TCP */
+
+/* Keylog and decryption related variables and routines */
+static bool vmess_decryption_supported;
+static const gchar* pref_keylog_file;
+
+static int proto_vmess;
+
+/****************VMess Fields******************/
+static int hf_vmess_request_auth;
+static int hf_vmess_response_header;
+static int hf_vmess_payload_length;
+
+// heads for displaying reassembly information
+static int hf_msg_fragments;
+static int hf_msg_fragment;
+static int hf_msg_fragment_overlap;
+static int hf_msg_fragment_overlap_conflicts;
+static int hf_msg_fragment_multiple_tails;
+static int hf_msg_fragment_too_long_fragment;
+static int hf_msg_fragment_error;
+static int hf_msg_fragment_count;
+static int hf_msg_reassembled_in;
+static int hf_msg_reassembled_length;
+static int hf_msg_body_segment;
+/**************VMess Fields End****************/
+
+/**************VMess ETT Fileds****************/
+
+static int ett_vmess;
+
+static gint ett_msg_fragment;
+static gint ett_msg_fragments;
+
+/************VMess ETT Fileds End**************/
+
+static const fragment_items msg_frag_items = {
+    &ett_msg_fragment,
+    &ett_msg_fragments,
+    &hf_msg_fragments,
+    &hf_msg_fragment,
+    &hf_msg_fragment_overlap,
+    &hf_msg_fragment_overlap_conflicts,
+    &hf_msg_fragment_multiple_tails,
+    &hf_msg_fragment_too_long_fragment,
+    &hf_msg_fragment_error,
+    &hf_msg_fragment_count,
+    &hf_msg_reassembled_in,
+    &hf_msg_reassembled_length,
+};
+
+
+int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     col_set_str(pinfo->cinfo, COL_INFO, "VMESS Request");
     proto_item* ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     proto_tree* vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_request_auth, tvb, 0, 16, ENC_BIG_ENDIAN);
 
+    vmess_conv_t* conv_data = (vmess_conv_t*)data;
+
+
+    /* If the header packet is decrypted, try to perform decryption */
+    if (!conv_data->req_decrypted) {
+
+    }
+
     return 0;
 }
 
-static guint
-get_dissect_vmess_response_len(packet_info* pinfo _U_, tvbuff_t* tvb,
+guint get_dissect_vmess_response_len(packet_info* pinfo _U_, tvbuff_t* tvb,
     int offset, void* data _U_) {
     return tvb_get_ntohs(tvb, offset + 38) + 40;
 }
 
-static int
-dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     proto_tree* vmess_tree;
     proto_item* ti;
     tvbuff_t* next_tvb;
@@ -65,6 +141,8 @@ dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     if (!conv_data) {
         conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
         conversation_add_proto_data(conversation, proto_vmess, conv_data);
+        /* Comment: How a conv_data is initialized? */
+        /* By using wmem_new0, all the memory allocated is set to 0. */
     }
     if (!conv_data->reassembly_info) {
         conv_data->reassembly_info = streaming_reassembly_info_new();
@@ -89,14 +167,12 @@ dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     return 0;
 }
 
-static guint
-get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
+guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
     int offset, void* data _U_) {
     return tvb_get_ntohs(tvb, offset) + 2;
 }
 
-static int
-dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     proto_tree* vmess_tree;
     proto_item* ti;
     tvbuff_t* next_tvb;
@@ -135,8 +211,7 @@ dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
     return 0;
 }
 
-static int
-dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_)
+int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_)
 {
     conversation_t* conversation;
     vmess_conv_t* conv_data = NULL;
@@ -178,6 +253,7 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     //    }
     //}
 
+    /* The request could be dissected only once, since it occupies exactly one packet. */
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
@@ -192,7 +268,8 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     }
 
     if (is_request) {
-        dissect_vmess_request(tvb, pinfo, tree, NULL);
+
+        dissect_vmess_request(tvb, pinfo, tree, conv_data);
 
         vmess_debug_flush();
 
@@ -228,10 +305,7 @@ dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *dat
     return tvb_reported_length(tvb);
 }
 
-
-
-static void
-vmess_keylog_read(void) {
+void vmess_keylog_read(void) {
     if (!vmess_decryption_supported) {
         return;
     }
@@ -286,8 +360,37 @@ vmess_keylog_read(void) {
 
 }
 
-static void
-vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km)
+static GRegex*
+vmess_compile_keyfile_regex(void)
+{
+#define OCTET "(?:[[:xdigit:]]{2})"
+    const gchar* pattern =
+        "(?:"
+        /* VMess AUTH to Derived Secrets mapping. */
+        "HEADER_KEY (?<header_key>" OCTET "{16})"
+        "|HEADER_IV (?<header_iv>" OCTET "{16})"
+        "|DATA_KEY (?<data_key>" OCTET "{16})"
+        "|DATA_IV (?<data_iv>" OCTET "{16})"
+        "|RESPONSE_TOKEN (?<response_token>" OCTET "{16})"
+        ") (?<secret>" OCTET "+)";
+#undef OCTET
+    static GRegex* regex = NULL;
+    GError* gerr = NULL;
+    if (!regex) {
+        regex = g_regex_new(pattern,
+            (GRegexCompileFlags)(G_REGEX_OPTIMIZE | G_REGEX_ANCHORED | G_REGEX_RAW),
+            G_REGEX_MATCH_ANCHORED, &gerr);
+        if (gerr) {
+            g_print("%s failed to compile regex: %s\n", G_STRFUNC,
+                gerr->message);
+            g_error_free(gerr);
+            regex = NULL;
+        }
+    }
+    return regex;
+}
+
+void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km)
 {
     ws_noisy("vmess process line: %s", data);
 
@@ -380,38 +483,8 @@ vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_
     g_match_info_free(mi);
 }
 
-GRegex* vmess_compile_keyfile_regex()
-{
-#define OCTET "(?:[[:xdigit:]]{2})"
-    const gchar* pattern =
-        "(?:"
-        /* VMess AUTH to Derived Secrets mapping. */
-        "HEADER_KEY (?<header_key>" OCTET "{16})"
-        "|HEADER_IV (?<header_iv>" OCTET "{16})"
-        "|DATA_KEY (?<data_key>" OCTET "{16})"
-        "|DATA_IV (?<data_iv>" OCTET "{16})"
-        "|RESPONSE_TOKEN (?<response_token>" OCTET "{16})"
-        ") (?<secret>" OCTET "+)";
-#undef OCTET
-    static GRegex* regex = NULL;
-    GError* gerr = NULL;
-    if (!regex) {
-        regex = g_regex_new(pattern,
-            (GRegexCompileFlags)(G_REGEX_OPTIMIZE | G_REGEX_ANCHORED | G_REGEX_RAW),
-            G_REGEX_MATCH_ANCHORED, &gerr);
-        if (gerr) {
-            g_print("%s failed to compile regex: %s\n", G_STRFUNC,
-                gerr->message);
-            g_error_free(gerr);
-            regex = NULL;
-        }
-    }
-    return regex;
-}
 
-
-static gboolean
-vmess_decrypt_init(void) {
+gboolean vmess_decrypt_init(void) {
     return TRUE;
 }
 

@@ -108,8 +108,12 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     proto_tree* vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_request_auth, tvb, 0, 16, ENC_BIG_ENDIAN);
 
-    vmess_conv_t* conv_data = (vmess_conv_t*)data;
-
+    conversation_t* conversation;
+    vmess_conv_t* conv_data;
+    /* get conversation, create if necessary*/
+    conversation = find_or_create_conversation(pinfo);
+    /* get associated state information, create if necessary */
+    conv_data = get_vmess_conv(conversation, proto_vmess);
 
     /* If the header packet is decrypted, try to perform decryption */
     if (!conv_data->req_decrypted) {
@@ -137,16 +141,7 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
     conversation = find_or_create_conversation(pinfo);
 
     /* get associated state information, create if necessary */
-    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
-    if (!conv_data) {
-        conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
-        conversation_add_proto_data(conversation, proto_vmess, conv_data);
-        /* Comment: How a conv_data is initialized? */
-        /* By using wmem_new0, all the memory allocated is set to 0. */
-    }
-    if (!conv_data->reassembly_info) {
-        conv_data->reassembly_info = streaming_reassembly_info_new();
-    }
+    conv_data = get_vmess_conv(conversation, proto_vmess);
 
     col_set_str(pinfo->cinfo, COL_INFO, "VMESS Response");
     ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
@@ -185,14 +180,7 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     conversation = find_or_create_conversation(pinfo);
 
     /* get associated state information, create if necessary */
-    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
-    if (!conv_data) {
-        conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
-        conversation_add_proto_data(conversation, proto_vmess, conv_data);
-    }
-    if (!conv_data->reassembly_info) {
-        conv_data->reassembly_info = streaming_reassembly_info_new();
-    }
+    conv_data = get_vmess_conv(conversation, proto_vmess);
 
     col_set_str(pinfo->cinfo, COL_INFO, "VMESS Data");
     ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
@@ -222,15 +210,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
     conversation = find_or_create_conversation(pinfo);
 
     /* get associated state information, create if necessary */
-    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
-    if (!conv_data) {
-        conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
-        conv_data->auth = NULL;
-        conversation_add_proto_data(conversation, proto_vmess, conv_data);
-    }
-    if (!conv_data->reassembly_info) {
-        conv_data->reassembly_info = streaming_reassembly_info_new();
-    }
+    conv_data = get_vmess_conv(conversation, proto_vmess);
 
     vmess_keylog_read();
 
@@ -269,7 +249,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 
     if (is_request) {
 
-        dissect_vmess_request(tvb, pinfo, tree, conv_data);
+        dissect_vmess_request(tvb, pinfo, tree, data);
 
         vmess_debug_flush();
 
@@ -769,6 +749,27 @@ proto_reg_handoff_vmess(void)
 #endif
     tls_handle = find_dissector("tls");
     dissector_add_uint("tcp.port", VMESS_TCP_PORT, vmess_handle);
+}
+
+vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess)
+{
+    vmess_conv_t* conv_data;
+
+    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
+    if (conv_data != NULL)
+        return conv_data;
+
+    /* no previous VMess conversation info, initialize it. */
+    conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
+    conv_data->req_decrypted = FALSE;
+    conv_data->data_decrypted = FALSE;
+    conv_data->resp_decrypted = FALSE;
+    conv_data->auth = NULL;
+    conv_data->reassembly_info = streaming_reassembly_info_new();
+
+    /* Add the conv_data to the conversation in this routine. */
+    conversation_add_proto_data(conversation, proto_vmess, conv_data);
+    return conv_data;
 }
 
 bool

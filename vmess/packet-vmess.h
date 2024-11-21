@@ -76,7 +76,7 @@ typedef struct {
      * to record key/iv or other things. Since GByteArray has an intrinsic length field, it should
      * avoid some cumbersome operations (I hope so).
      */
-    GByteArray write_iv;
+    GByteArray* write_iv;
     const VMessCipherSuite* cipher_suite;
     VMESS_CIPHER_CTX evp;
 } VMessDecoder;
@@ -163,7 +163,9 @@ typedef struct _vmess_conv_t {
     gboolean data_decrypted;    /* Used to check if the Data is decrypted */
     gboolean resp_decrypted;    /* Used to check if the Response Header is decrypted */
     streaming_reassembly_info_t* reassembly_info;
-    vmess_decrypt_info_t* vmess_decrypt_info;
+    //vmess_decrypt_info_t* vmess_decrypt_info;
+    VMessDecoder* data_decoder;
+    VMessDecoder* header_decoder;
     gchar* auth;
     /* Used to speed up desegmenting of chunked Transfer-Encoding. */
     wmem_map_t* chunk_offsets_fwd;
@@ -197,6 +199,22 @@ typedef struct _vmess_conv_t {
     wmem_map_t* matches_table;
 
 } vmess_conv_t;
+
+/**
+ * Encapsulate the conv_data fetching process:
+ * 
+ *  conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
+ *  if (!conv_data) {
+ *      conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
+ *      conversation_add_proto_data(conversation, proto_vmess, conv_data);
+ *  }
+ *  if (!conv_data->reassembly_info) {
+ *      conv_data->reassembly_info = streaming_reassembly_info_new();
+ *  }
+ * 
+ * into a single routine.
+ */
+vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess);
 
 /* request or response streaming reassembly data */
 typedef struct {

@@ -16,25 +16,6 @@
 #include <glib.h>
 #include <gcrypt.h>
 
-void proto_register_vmess(void);
-void proto_reg_handoff_vmess(void);
-int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-
-
-/* Used to do the overall initialization. */
-void vmess_init(void);
-
-
-/* Used to do the overall clean-up. */
-void vmess_cleanup(void);
-
-void vmess_free(gpointer data);
-
-
-
 #define TLS_SIGNUM (gint)5 /* The number of TLS record types. */
 
 #define VMESS_PROTO_DATA_REQRES	0
@@ -42,8 +23,27 @@ void vmess_free(gpointer data);
 
 #define VMESS_TCP_PORT 20332 /* Not IANA registed */
 
+#define VMESS_AUTH_LENGTH (guint) 16
+#define VMESS_RESPONSE_HEADER_LENGTH (guint) 40
+#define VMESS_DATA_HEADER_LENGTH (guint) 2
+
+/* Protocol register and dissection routines */
+void proto_register_vmess(void);
+void proto_reg_handoff_vmess(void);
+int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+
+/* Protocol data structure init and cleanup routines */
+/* Used to do the overall initialization. */
+void vmess_init(void);
+/* Used to do the overall clean-up. */
+void vmess_cleanup(void);
+void vmess_free(gpointer data);
 
 
+/* VMess decryption structures and routines */
 #define VMESS_CIPHER_CTX gcry_cipher_hd_t
 
 typedef struct _vmess_key_map_t {
@@ -91,10 +91,6 @@ typedef struct vmess_master_key_match_group {
     GHashTable* key_ht;
 } vmess_key_match_group_t;
 
-
-
-/* Routines */
-
 //static void vmess_keylog_read(const gchar* vmess_keylog_filename, FILE** keylog_file,
 //    const vmess_key_map_t* km);
 void vmess_keylog_read(void);
@@ -114,27 +110,11 @@ void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key
  */
 gboolean vmess_decrypt_init(void);
 
-/**
- * Since VMess auth is 16-byte long, we could split the auth into 4-byte long and hash.
- */
 
-
-
-/*
- * User preference related variables.
- * See Section 2.6 in README.dissector for some guide.
- * 
- * See packet-wireguard.c for instructions on how to register pref in practice.
- */
-
-#define VMESS_AUTH_LENGTH (guint) 16
-#define VMESS_RESPONSE_HEADER_LENGTH (guint) 40
-#define VMESS_DATA_HEADER_LENGTH (guint) 2
+/* Reassembly related structures and routines */
 
 // reassembly table for streaming chunk mode
 static reassembly_table proto_vmess_streaming_reassembly_table;
-
-
 
 /** information about a request and response on a VMess conversation. */
 typedef struct _vmess_req_res_t {
@@ -197,7 +177,6 @@ typedef struct _vmess_conv_t {
     /* Used for req/res matching */
     GSList* req_list;
     wmem_map_t* matches_table;
-
 } vmess_conv_t;
 
 /**
@@ -236,6 +215,41 @@ typedef struct {
     vmess_streaming_reassembly_data_t* res_streaming_reassembly_data;
 } vmess_req_res_private_data_t;
 
+/* Debug relavant variables and routines */
+/* From packet-ssh.c, packet-tls.c and packet-tls-utils.c */
+#define VMESS_DECRYPT_DEBUG
+
+#ifdef VMESS_DECRYPT_DEBUG /* {{{ */
+
+/*
+ * User preference related variables.
+ * See Section 2.6 in README.dissector for some guide.
+ *
+ * See packet-wireguard.c for instructions on how to register pref in practice.
+ */
+static const gchar* vmess_debug_file_name;
+#define VMESS_DEBUG_USE_STDERR "-"
+
+static FILE* vmess_debug_file;
+
+void vmess_set_debug(const gchar* name);
+
+void vmess_debug_printf(const gchar* fmt, ...);
+
+void vmess_prefs_apply_cb(void);
+
+void vmess_debug_flush(void);
+
+void vmess_debug_print_hash_table(GHashTable* hash_table);
+
+void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_data);
+#else
+#define vmess_set_debug(name)
+#define vmess_debug_flush()
+#define vmess_debug_print_hash_table(hash_table)
+#define vmess_debug_print_key_value(key, value, user_data)
+#endif /* VMESS_DECRYPT_DEBUG }}} */
+
 
 /* Some util functions */
 bool gbytearray_eq(const GByteArray*, const GByteArray*);
@@ -262,35 +276,6 @@ gint tvb_find_TLS_signiture(tvbuff_t* tvb);
  * return the index instead of the pointer to the match. It returns -1 if no match was found.
  */
 gint mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size);
-
-/* Debug relavant variables and functions */
-/* From packet-ssh.c, packet-tls.c and packet-tls-utils.c */
-#define VMESS_DECRYPT_DEBUG
-
-#ifdef VMESS_DECRYPT_DEBUG /* {{{ */
-
-static const gchar* vmess_debug_file_name;
-#define VMESS_DEBUG_USE_STDERR "-"
-
-static FILE* vmess_debug_file;
-
-void vmess_set_debug(const gchar* name);
-
-void vmess_debug_printf(const gchar* fmt, ...);
-
-void vmess_prefs_apply_cb(void);
-
-void vmess_debug_flush(void);
-
-void vmess_debug_print_hash_table(GHashTable* hash_table);
-
-void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_data);
-#else
-#define vmess_set_debug(name)
-#define vmess_debug_flush()
-#define vmess_debug_print_hash_table(hash_table)
-#define vmess_debug_print_key_value(key, value, user_data)
-#endif /* VMESS_DECRYPT_DEBUG }}} */
 
 /*
  * Write the content of a string into its hex form. For example, given the string

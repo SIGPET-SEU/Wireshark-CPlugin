@@ -214,24 +214,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 
     vmess_keylog_read();
 
-    //const char* auth = "\xb0\xb2\x5c\xda\x68\x1c\x15\x53\x74\xb3\x5b\x5f\xcc\x3f\x81\xe7";
-    //const char* auth = "\x43\xe7\xf4\x86\xc9\x36\xde\x80\xec\x3d\x0e\xbf\x82\x06\x5e\x8c";
-    //const char* auth = "\xfc\xc1\x8b\x89\x42\xc6\x70\xfd\xcb\x17\xe3\xb0\x7f\x72\xf2\x7f";
-
     bool is_request = false;
-
-    
-    //if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
-    //    gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
-    //    tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
-    //    if (char_array_eq(auth, tmp_auth, VMESS_AUTH_LENGTH)) {
-    //        if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) { 
-    //            conv_data->auth = wmem_strndup(wmem_file_scope(), tmp_auth, VMESS_AUTH_LENGTH);
-    //            g_free(tmp_auth);
-    //        }
-    //        is_request = true;
-    //    }
-    //}
 
     /* The request could be dissected only once, since it occupies exactly one packet. */
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
@@ -330,11 +313,6 @@ void vmess_keylog_read(void) {
             }
             break;
         }
-
-        /* Strip '\n' and '\r' chars from lines. */
-        /*size_t len = strlen(buf);
-        while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n')) { len -= 1; buf[len] = 0; }*/
-
         vmess_keylog_process_line((const guint8*)line, strlen(line), &vmess_key_map);
     }
 

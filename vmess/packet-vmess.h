@@ -15,6 +15,7 @@
 
 #include <glib.h>
 #include <gcrypt.h>
+#include <stdarg.h> /* For variable number of args in VMess KDF */
 
 #define TLS_SIGNUM (gint)5 /* The number of TLS record types. */
 
@@ -44,7 +45,31 @@ void vmess_free(gpointer data);
 
 
 /* VMess decryption structures and routines */
+/* Error handling for libgcrypt */ 
+#define GCRYPT_CHECK(gcry_error)                        \
+    if (gcry_error) {                                   \
+        fprintf(stderr, "Failure at line %d: %s\n",     \
+                __LINE__, gcry_strerror(gcry_error));   \
+        return gcry_error;                              \
+    }
+
 #define VMESS_CIPHER_CTX gcry_cipher_hd_t
+#define GCM_IV_SIZE 12
+#define POLY1305_IV_SIZE 12
+
+#define GCM_TAG_SIZE 16
+#define POLY1305_TAG_SIZE 16
+
+extern const char* kdfSaltConstAuthIDEncryptionKey;
+extern const char* kdfSaltConstAEADRespHeaderLenKey;
+extern const char* kdfSaltConstAEADRespHeaderLenIV;
+extern const char* kdfSaltConstAEADRespHeaderPayloadKey;
+extern const char* kdfSaltConstAEADRespHeaderPayloadIV;
+extern const char* kdfSaltConstVMessAEADKDF;
+extern const char* kdfSaltConstVMessHeaderPayloadAEADKey;
+extern const char* kdfSaltConstVMessHeaderPayloadAEADIV;
+extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADKey;
+extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
 
 typedef struct _vmess_key_map_t {
     GHashTable* header_key;
@@ -54,22 +79,110 @@ typedef struct _vmess_key_map_t {
     GHashTable* response_token; // Check if the response matches the request.
 } vmess_key_map_t;
 
+/*
+ * The C implementation of VMess HMACCreator implemented in Clash.
+ * Currently, only SHA256-based HMAC is supported.
+ */
+#define SHA_256_BLOCK_SIZE 64
+
+typedef struct HMACCreator_t {
+    struct HMACCreator_t* parent;
+    guchar* value;
+    gsize value_len;
+    gcry_md_hd_t* h_in, * h_out;
+} HMACCreator;
+
+/*
+ * Note that it is hmac_create's duty to open hashing handles, this
+ * function only takes care of setting up keys.
+ */
+HMACCreator*
+hmac_creator_new(HMACCreator* parent, const guchar* value, gsize value_len);
+
+/*
+ * HMAC creator cleanup routine, it will clear all the memory the
+ * possible parents allocated recursively.
+ *
+ * Since it will also close the hashing handles, the caller should
+ * keep in mind to call hmac_create FIRST to avoid closing an
+ * uninitialized hashing handle, which ALWAYS raises SIGSEGV error.
+ *
+ * NOTE: This routine also frees the param, so the caller should NOT free the param again.
+ */
+void
+hmac_creator_free(HMACCreator* creator);
+
+/*
+ * Create HMAC using the base creator.
+ */
+gcry_error_t
+hmac_create(const HMACCreator* creator);
+
+
+/*
+ * This struct is used to produce the actual nested HMAC computation.
+ * It is based on the array structure, where each of the entry is a
+ * hash handle.
+ */
+typedef struct HMACDigester_t {
+    int size;
+    guint* order;
+    gcry_md_hd_t** head;
+} HMACDigester;
+
+/*
+ * Create the digester based on the creator.
+ */
+HMACDigester*
+hmac_digester_new(HMACCreator* creator);
+
+/*
+ * HMAC digester cleanup routine, it will clear all the memory for the digester.
+ *
+ * Note that all the hash handles are copies of the original ones, so the digester
+ * only closes their copies. The caller is responsible to call hmac_creator_free to
+ * safely free the allocated memory for that creator.
+ *
+ * NOTE: This routine also frees the param, so the caller should NOT free the param again.
+ */
+void
+hmac_digester_free(HMACDigester* digester);
+
+/*
+ * This function computes nested HMAC based on iterative approach instead of
+ * the recursive one which is adopted in the Golang implementation.
+ */
+gcry_error_t
+hmac_digest(HMACDigester* digester, const guchar* msg, gssize msg_len, guchar* digest);
+
+/*
+ * This function is a convenient function to compute the digest of msg given hd, while
+ * maintain the internal state of hd by creating a copy of it. Therefore, using this
+ * routine will NOT change the internal state of hd.
+ *
+ * NOTE that the caller is responsible to allocate enough memory for param digest.
+ */
+gcry_error_t
+hmac_digest_on_copy(gcry_md_hd_t hd, const guchar* msg, gssize msg_len, guchar* digest);
+
+
 /* Used to clean the VMess key map. */
-static void vmess_common_clean(vmess_key_map_t* km);
+void vmess_common_clean(vmess_key_map_t* km);
 
 /* Used to initialize the VMess key map. */
-static void vmess_common_init(vmess_key_map_t* km);
+void vmess_common_init(vmess_key_map_t* km);
 
-typedef enum {
-    MODE_NONE,      /* No encryption, for debug only */
-    MODE_CFB,       /* CFB mode */
-    MODE_GCM,       /* GenericAEADCipher */
-    MODE_POLY1305,  /* AEAD_CHACHA20_POLY1305 with 16 byte auth tag (RFC 7905) */
-} vmess_cipher_mode_t;
+//typedef enum {
+//    MODE_NONE,      /* No encryption, for debug only */
+//    MODE_CFB,       /* CFB mode */
+//    MODE_GCM,       /* GenericAEADCipher */
+//    MODE_POLY1305,  /* AEAD_CHACHA20_POLY1305 with 16 byte auth tag (RFC 7905) */
+//} vmess_cipher_mode_t;
 
-typedef struct _VMessCipherSuite {
-    vmess_cipher_mode_t mode;
-} VMessCipherSuite;
+typedef struct vmess_cipher_suite {
+    enum gcry_cipher_modes mode;
+    enum gcry_cipher_algos algo;
+} vmess_cipher_suite_t;
 
 typedef struct {
     /* In this version, I decide to use GByteArray instead of StringInfo used in packet-tls-utils.h
@@ -77,7 +190,7 @@ typedef struct {
      * avoid some cumbersome operations (I hope so).
      */
     GByteArray* write_iv;
-    const VMessCipherSuite* cipher_suite;
+    const vmess_cipher_suite_t* cipher_suite;
     VMESS_CIPHER_CTX evp;
 } VMessDecoder;
 
@@ -109,6 +222,47 @@ void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key
  * Must be called before attempting decryption.
  */
 gboolean vmess_decrypt_init(void);
+
+/*
+ * Decoder initialization routine.
+ *
+ * @param algo          A cipher algorithm
+ * @param key           The encryption key, since the key length could be inferred by the algorithm,
+ *                      it does not need to be specified explicitly
+ * @param iv            encryption IV, since the iv length could be inferred by the mode, it does not
+ *                      need to be specified explicitly
+ * @param flag          Some extra flag.
+ */
+VMessDecoder*
+vmess_decoder_new(int algo, int mode, guchar* key, guchar* iv, guint flags);
+
+/*
+ * Cipher initialization routine.
+ *
+ * @param alg       The encryption algorithm
+ * @param mode      The cipher mode
+ * @param key       The encryption key
+ * @param key_len   The length of the key, if set 0, automatic inference will be used
+ * @param iv        The initialization IV
+ * @param iv_len    The length of the iv, if set 0, automatic inference will be used
+ * @param flag      The flag for encryption
+ *
+ * @return gboolean TRUE on success.
+ */
+gcry_error_t
+vmess_cipher_init(gcry_cipher_hd_t* hd, int algo, int mode, guchar* key, gsize key_len, guchar* iv, gsize iv_len, guint flags);
+
+/*
+ * Key derive function for VMess.
+ *
+ * @param key           The original key used for key derivation
+ * @param derived_key   The key derived by the KDF
+ * @param num           The number of the messages for key derivation
+ *
+ * @return guchar*      The derived key byte buffer
+ */
+guchar*
+vmess_kdf(const guchar* key, guint key_len, guint num, ...);
 
 
 /* Reassembly related structures and routines */

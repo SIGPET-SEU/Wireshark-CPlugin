@@ -53,6 +53,8 @@ void vmess_free(gpointer data);
         return gcry_error;                              \
     }
 
+#define AES_128_KEY_SIZE 16
+
 #define VMESS_CIPHER_CTX gcry_cipher_hd_t
 #define GCM_IV_SIZE 12
 #define POLY1305_IV_SIZE 12
@@ -194,10 +196,11 @@ typedef struct {
     VMESS_CIPHER_CTX evp;
 } VMessDecoder;
 
-typedef struct {
-    VMessDecoder data_decoder;
-    VMessDecoder header_decoder;
-} vmess_decrypt_info_t;
+//typedef struct {
+//    VMessDecoder header_len_decoder;
+//    VMessDecoder header_decoder;
+//    VMessDecoder data_decoder;
+//} vmess_decrypt_info_t;
 
 typedef struct vmess_master_key_match_group {
     const char* re_group_name;
@@ -298,8 +301,9 @@ typedef struct _vmess_conv_t {
     gboolean resp_decrypted;    /* Used to check if the Response Header is decrypted */
     streaming_reassembly_info_t* reassembly_info;
     //vmess_decrypt_info_t* vmess_decrypt_info;
-    VMessDecoder* data_decoder;
+    VMessDecoder* header_len_decoder;
     VMessDecoder* header_decoder;
+    VMessDecoder* data_decoder;
     gchar* auth;
     /* Used to speed up desegmenting of chunked Transfer-Encoding. */
     wmem_map_t* chunk_offsets_fwd;

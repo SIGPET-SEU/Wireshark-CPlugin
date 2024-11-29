@@ -112,10 +112,69 @@ const char* kdfSaltConstVMessHeaderPayloadAEADIV = "VMess Header AEAD Nonce";
 const char* kdfSaltConstVMessHeaderPayloadLengthAEADKey = "VMess Header AEAD Key_Length";
 const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV = "VMess Header AEAD Nonce_Length";
 
+/**
+ * The VMess request with AEAD encryption is divided into 4 parts:
+ * ----------------------------------------------------------------------------------------------------------------------------
+ * | generatedID (16B) | payloadHeaderLengthAEADEncrypted (18B) | connectionNonce (8B) | payloadLengthAEADEncrypted (Len+16B) |
+ * ----------------------------------------------------------------------------------------------------------------------------
+ * Where payloadHeaderLengthAEADEncrypted consists of actual length (2B) along with 16B tag (for AES-GCM);
+ * When we successfully decrypt the actual length, we fetch its value (Len), which is used for header decryption.
+ * 
+ * The actual decryption algorithm for this routine runs as follows:
+ * 1. Initialize the header_len_decoder and header_decoder separately, using vmess_kdf for key derivation;
+ * 2. Fetch the pointer to tvb+16 with length=18, and perform header length decryption using header_len_decoder;
+ * 3. Add the actual header length to the dissect tree;
+ * 4. Fetch the pointer to tvb+42 with length=Len+16, and perform header decryption using header_decoder;
+ * 5. Dissect the decrypted header, and append necessary information to the dissect tree;
+ * 6. Add the decrypted header bytes to a new tab.
+ * 
+ * TODO: Error handling and logging.
+ * 
+ * @param tvb, pinfo, offset
+ * @param conv_data     The conversation data related to the current VMess conversation.
+ */
 static gboolean
-decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data,
-    guint8 content_type, guint16 record_version, guint16 record_length,
-    gboolean allow_fragments, guint8 curr_layer_num_ssl) {
+decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
+    GByteArray* header_key = g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
+    GByteArray* header_iv = g_hash_table_lookup(vmess_key_map.data_iv, conv_data->auth);
+
+    /* Convert the IV to char* type, which is required by vmess_kdf */
+    gchar* connectionNonce = g_malloc(header_iv->len + 1);
+    connectionNonce[header_iv->len] = '\0';
+
+    guchar* payloadHeaderLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
+    guchar* payloadHeaderLengthAEADNonce = g_malloc(GCM_IV_SIZE);
+    guchar* tmp_derived_key;
+    
+    /* Initialize the header_len_decoder */
+    tmp_derived_key = vmess_kdf(header_key->data, header_key->len, 3,
+        kdfSaltConstVMessHeaderPayloadLengthAEADKey,
+        conv_data->auth,
+        connectionNonce);
+    memcpy(payloadHeaderLengthAEADKey, tmp_derived_key, AES_128_KEY_SIZE);
+    g_free(tmp_derived_key);
+
+    tmp_derived_key = vmess_kdf(header_key->data, header_key->len, 3,
+        kdfSaltConstVMessHeaderPayloadLengthAEADIV,
+        conv_data->auth,
+        connectionNonce);
+    memcpy(payloadHeaderLengthAEADNonce, tmp_derived_key, GCM_IV_SIZE);
+    g_free(tmp_derived_key);
+
+    conv_data->header_len_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
+                                    payloadHeaderLengthAEADKey, payloadHeaderLengthAEADNonce, 0);
+    guint aeadPayloadLengthSize = 2;
+    guchar* AEADPayloadLengthSerializedByte = g_malloc(aeadPayloadLengthSize);
+
+    gcry_error_t err = vmess_byte_decryption(conv_data->header_len_decoder,
+                                            (const guchar*)tvb_get_ptr(tvb, 16, aeadPayloadLengthSize + 16),
+                                            aeadPayloadLengthSize + 16,
+                                            AEADPayloadLengthSerializedByte,
+                                            aeadPayloadLengthSize,
+                                            conv_data->auth, strlen(conv_data->auth));
+    /* TODO: Error handling and check length decryption. */
+    if (err != 0) return false; /* Decryption failed */
+
     return true;
 }
 
@@ -134,14 +193,8 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
     /* If the header packet is decrypted, try to perform decryption */
-    if (!conv_data->req_decrypted) {
-        GByteArray* header_key = g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
-        GByteArray* header_iv = g_hash_table_lookup(vmess_key_map.data_iv, conv_data->auth);
-
-        conv_data->header_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
-                                                        header_key->data, header_iv->data, 0);
-        decrypt_vmess_request(tvb, pinfo, 0, conv_data, 0, 0, 0, false, 0);
-
+    if (!conv_data->req_decrypted){
+        decrypt_vmess_request(tvb, pinfo, 0, conv_data);
     }
 
     return 0;
@@ -740,6 +793,40 @@ guchar* vmess_kdf(const guchar* key, guint key_len, guint num, ...) {
     hmac_digester_free(digester);
 
     return digest;
+}
+
+gcry_error_t
+vmess_byte_decryption(VMessDecoder* decoder, guchar* in, gsize inl, guchar* out, gsize outl, const guchar* ad,
+    gsize ad_len) {
+    gcry_error_t err = 0;
+    if (ad) {
+        err = gcry_cipher_authenticate(decoder->evp, ad, ad_len);
+        GCRYPT_CHECK(err)
+    }
+    guint tag_len;
+    switch (decoder->cipher_suite->mode) {
+    case GCRY_CIPHER_MODE_GCM:
+    case GCRY_CIPHER_MODE_POLY1305:
+        tag_len = 16;
+        break;
+    default:
+        tag_len = -1;
+        /* Unsupported encryption mode. */
+        return gcry_error(GPG_ERR_NOT_IMPLEMENTED);
+    }
+    gsize ciphertext_len = inl - tag_len;
+    err = gcry_cipher_decrypt(decoder->evp, out, outl, in, ciphertext_len);
+    GCRYPT_CHECK(err)
+
+    guchar* calc_tag = g_malloc(tag_len);
+    err = gcry_cipher_final(decoder->evp);
+    GCRYPT_CHECK(err)
+
+    err = gcry_cipher_gettag(decoder->evp, calc_tag, tag_len);
+    if (memcmp(calc_tag, in + ciphertext_len, tag_len) != 0)
+        return gcry_error(GPG_ERR_DECRYPT_FAILED);
+    g_free(calc_tag);
+    return err;
 }
 
 void vmess_common_init(vmess_key_map_t* km)

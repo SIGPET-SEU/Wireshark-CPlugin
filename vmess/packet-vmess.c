@@ -135,11 +135,12 @@ const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV = "VMess Header AEAD Nonc
  */
 static gboolean
 decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
-    GByteArray* header_key = g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
-    GByteArray* header_iv = g_hash_table_lookup(vmess_key_map.data_iv, conv_data->auth);
+    GByteArray* header_key = g_hash_table_lookup(vmess_key_map.header_key, conv_data->auth);
+    GByteArray* header_iv = g_hash_table_lookup(vmess_key_map.header_iv, conv_data->auth);
 
     /* Convert the IV to char* type, which is required by vmess_kdf */
     gchar* connectionNonce = g_malloc(header_iv->len + 1);
+    memcpy(connectionNonce, header_iv->data, header_iv->len);
     connectionNonce[header_iv->len] = '\0';
 
     guchar* payloadHeaderLengthAEADKey = g_malloc(AES_128_KEY_SIZE);

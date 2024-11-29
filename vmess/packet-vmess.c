@@ -173,7 +173,10 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_c
                                             aeadPayloadLengthSize,
                                             conv_data->auth, strlen(conv_data->auth));
     /* TODO: Error handling and check length decryption. */
-    if (err != 0) return false; /* Decryption failed */
+    if (err != 0) {
+        vmess_debug_printf("Decryption failed: %s.\n", gcry_strsource(err));
+        return false; /* Decryption failed */
+    }
 
     return true;
 }
@@ -194,7 +197,8 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
 
     /* If the header packet is decrypted, try to perform decryption */
     if (!conv_data->req_decrypted){
-        decrypt_vmess_request(tvb, pinfo, 0, conv_data);
+        gboolean success = decrypt_vmess_request(tvb, pinfo, 0, conv_data);
+        if (!success) return 0; /* Give up decryption upon failure. */
     }
 
     return 0;

@@ -167,7 +167,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_c
     guchar* AEADPayloadLengthSerializedByte = g_malloc(aeadPayloadLengthSize);
 
     gcry_error_t err = vmess_byte_decryption(conv_data->header_len_decoder,
-                                            (const guchar*)tvb_get_ptr(tvb, 16, aeadPayloadLengthSize + 16),
+                                            tvb_get_ptr(tvb, 16, aeadPayloadLengthSize + 16),
                                             aeadPayloadLengthSize + 16,
                                             AEADPayloadLengthSerializedByte,
                                             aeadPayloadLengthSize,
@@ -800,7 +800,7 @@ guchar* vmess_kdf(const guchar* key, guint key_len, guint num, ...) {
 }
 
 gcry_error_t
-vmess_byte_decryption(VMessDecoder* decoder, guchar* in, gsize inl, guchar* out, gsize outl, const guchar* ad,
+vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, guchar* out, gsize outl, const guchar* ad,
     gsize ad_len) {
     gcry_error_t err = 0;
     if (ad) {

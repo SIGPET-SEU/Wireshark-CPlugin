@@ -815,8 +815,8 @@ guchar* vmess_kdf(const guchar* key, guint key_len, guint num, ...) {
     va_list valist;
     va_start(valist, num);
     for (guint i = 0; i < num; i++) {
-        const char* path = va_arg(valist, const char*);
-        creator = hmac_creator_new(creator, (const guchar*)path, strlen(path));
+        GString* path = va_arg(valist, const GString*);
+        creator = hmac_creator_new(creator, (const guchar*)path->str, path->len);
     }
     va_end(valist);
 
@@ -1054,6 +1054,7 @@ proto_register_vmess(void)
     module_t* vmess_module;
 
     /* Initialize key derive labels */
+    /* TODO: Free the paths when the file is closed */
     kdfSaltConstAuthIDEncryptionKey = g_string_new_take("AES Auth ID Encryption");
     kdfSaltConstAEADRespHeaderLenKey = g_string_new_take("AEAD Resp Header Len Key");
     kdfSaltConstAEADRespHeaderLenIV = g_string_new_take("AEAD Resp Header Len IV");

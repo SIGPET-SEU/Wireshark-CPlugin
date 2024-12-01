@@ -307,7 +307,7 @@ typedef struct _vmess_conv_t {
     VMessDecoder* header_len_decoder;
     VMessDecoder* header_decoder;
     VMessDecoder* data_decoder;
-    GByteArray* auth;
+    GString* auth;
     /* Used to speed up desegmenting of chunked Transfer-Encoding. */
     wmem_map_t* chunk_offsets_fwd;
     wmem_map_t* chunk_offsets_rev;

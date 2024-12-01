@@ -866,51 +866,51 @@ vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, 
     return err;
 }
 
-/**
- * vmess_equal and vmess_hash are stolen from packet-tls-utils.c
- */
-gboolean vmess_equal(gconstpointer a, gconstpointer b) {
-    const GByteArray* val1;
-    const GByteArray* val2;
-    val1 = (const GByteArray*)a;
-    val2 = (const GByteArray*)b;
-
-    if (val1->len == val2->len &&
-        !memcmp(val1->data, val2->data, val2->len)) {
-        return 1;
-    }
-    return 0;
-};
-
-guint vmess_hash(gconstpointer v) {
-    const GByteArray* arr;
-    guint l, hash;
-    const guint* cur;
-    hash = 0;
-    arr = (const GByteArray*)v;
-
-    /*  id and id->data are mallocated in ssl_save_master_key().  As such 'data'
-     *  should be aligned for any kind of access (for example as a guint as
-     *  is done below).  The intermediate void* cast is to prevent "cast
-     *  increases required alignment of target type" warnings on CPUs (such
-     *  as SPARCs) that do not allow misaligned memory accesses.
-     */
-    cur = (const guint*)(void*)arr->data;
-
-    for (l = 4; (l < arr->len); l += 4, cur++)
-        hash = hash ^ (*cur);
-
-    return hash;
-}
+///**
+// * vmess_equal and vmess_hash are stolen from packet-tls-utils.c
+// */
+//gboolean vmess_equal(gconstpointer a, gconstpointer b) {
+//    const GByteArray* val1;
+//    const GByteArray* val2;
+//    val1 = (const GByteArray*)a;
+//    val2 = (const GByteArray*)b;
+//
+//    if (val1->len == val2->len &&
+//        !memcmp(val1->data, val2->data, val2->len)) {
+//        return 1;
+//    }
+//    return 0;
+//};
+//
+//guint vmess_hash(gconstpointer v) {
+//    const GByteArray* arr;
+//    guint l, hash;
+//    const guint* cur;
+//    hash = 0;
+//    arr = (const GByteArray*)v;
+//
+//    /*  id and id->data are mallocated in ssl_save_master_key().  As such 'data'
+//     *  should be aligned for any kind of access (for example as a guint as
+//     *  is done below).  The intermediate void* cast is to prevent "cast
+//     *  increases required alignment of target type" warnings on CPUs (such
+//     *  as SPARCs) that do not allow misaligned memory accesses.
+//     */
+//    cur = (const guint*)(void*)arr->data;
+//
+//    for (l = 4; (l < arr->len); l += 4, cur++)
+//        hash = hash ^ (*cur);
+//
+//    return hash;
+//}
 
 void vmess_common_init(vmess_key_map_t* km)
 {
     // Use wmem to manage memory, instead of using g_free.
-    km->data_iv = g_hash_table_new(vmess_hash, vmess_equal);
-    km->data_key = g_hash_table_new(vmess_hash, vmess_equal);
-    km->header_iv = g_hash_table_new(vmess_hash, vmess_equal);
-    km->header_key = g_hash_table_new(vmess_hash, vmess_equal);
-    km->response_token = g_hash_table_new(vmess_hash, vmess_equal);
+    km->data_iv = g_hash_table_new(g_string_hash, g_string_equal);
+    km->data_key = g_hash_table_new(g_string_hash, g_string_equal);
+    km->header_iv = g_hash_table_new(g_string_hash, g_string_equal);
+    km->header_key = g_hash_table_new(g_string_hash, g_string_equal);
+    km->response_token = g_hash_table_new(g_string_hash, g_string_equal);
 }
 
 void vmess_init(void)

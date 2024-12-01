@@ -191,7 +191,7 @@ typedef struct {
      * to record key/iv or other things. Since GByteArray has an intrinsic length field, it should
      * avoid some cumbersome operations (I hope so).
      */
-    GByteArray* write_iv;
+    GString* write_iv;
     const vmess_cipher_suite_t* cipher_suite;
     VMESS_CIPHER_CTX evp;
 } VMessDecoder;

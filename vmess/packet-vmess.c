@@ -185,7 +185,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
                                             aeadPayloadLengthSize + 16,
                                             AEADPayloadLengthSerializedByte,
                                             aeadPayloadLengthSize,
-                                            conv_data->auth, strlen(conv_data->auth));
+                                            conv_data->auth->str, conv_data->auth->len);
     if (err != 0) {
         vmess_debug_printf("Decryption failed: %s.\n", gcry_strsource(err));
         return false; /* Decryption failed */

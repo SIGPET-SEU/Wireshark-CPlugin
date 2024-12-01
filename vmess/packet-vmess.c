@@ -103,16 +103,16 @@ static const fragment_items msg_frag_items = {
     &hf_msg_reassembled_length,
 };
 
-const char* kdfSaltConstAuthIDEncryptionKey = "AES Auth ID Encryption";
-const char* kdfSaltConstAEADRespHeaderLenKey = "AEAD Resp Header Len Key";
-const char* kdfSaltConstAEADRespHeaderLenIV = "AEAD Resp Header Len IV";
-const char* kdfSaltConstAEADRespHeaderPayloadKey = "AEAD Resp Header Key";
-const char* kdfSaltConstAEADRespHeaderPayloadIV = "AEAD Resp Header IV";
-const char* kdfSaltConstVMessAEADKDF = "VMess AEAD KDF";
-const char* kdfSaltConstVMessHeaderPayloadAEADKey = "VMess Header AEAD Key";
-const char* kdfSaltConstVMessHeaderPayloadAEADIV = "VMess Header AEAD Nonce";
-const char* kdfSaltConstVMessHeaderPayloadLengthAEADKey = "VMess Header AEAD Key_Length";
-const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV = "VMess Header AEAD Nonce_Length";
+static GString* kdfSaltConstAuthIDEncryptionKey;
+static GString* kdfSaltConstAEADRespHeaderLenKey;
+static GString* kdfSaltConstAEADRespHeaderLenIV;
+static GString* kdfSaltConstAEADRespHeaderPayloadKey;
+static GString* kdfSaltConstAEADRespHeaderPayloadIV;
+static GString* kdfSaltConstVMessAEADKDF;
+static GString* kdfSaltConstVMessHeaderPayloadAEADKey;
+static GString* kdfSaltConstVMessHeaderPayloadAEADIV;
+static GString* kdfSaltConstVMessHeaderPayloadLengthAEADKey;
+static GString* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
 
 /**
  * The VMess request with AEAD encryption is divided into 4 parts:
@@ -324,17 +324,24 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 
     /* The request could be dissected only once, since it occupies exactly one packet. */
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
-        gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
-        tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
-        //gchar* tmp_auth = "004a1703030045848e8d66c95b5a3528";
+        gchar* tmp_auth_raw_data = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
+        tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth_raw_data, (VMESS_AUTH_LENGTH + 1));
+
+        GByteArray* tmp_auth = g_byte_array_new();
+        memcpy(tmp_auth->data, tmp_auth_raw_data, VMESS_AUTH_LENGTH);
+        tmp_auth->len = VMESS_AUTH_LENGTH;
+        g_free(tmp_auth_raw_data);
+
         GByteArray* key = (GByteArray *)g_hash_table_lookup(vmess_key_map.header_key, tmp_auth);
         if (key) {
             if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) {
-                /* Note that wmem_strndup automatically allocate the memory for the '\0' at the tail. */
-                conv_data->auth = wmem_strndup(wmem_file_scope(), tmp_auth, VMESS_AUTH_LENGTH);
-                g_free(tmp_auth);
+                /* Only when the auth is found should we create a auth in file scope */
+                conv_data->auth = wmem_new0(wmem_file_scope(), GByteArray);
+                conv_data->auth->len = tmp_auth->len;
+                memcpy(conv_data->auth->data, tmp_auth->data, tmp_auth->len);
             }
             is_request = true;
+            g_byte_array_free(tmp_auth, true);
         }
     }
 
@@ -518,7 +525,7 @@ void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key
         /* Note that the secret read in is in plaintext form, it should be converted into hex form later. */
         gchar* hex_secret;
         gchar* hex_auth;
-        gchar* auth = wmem_alloc(wmem_file_scope(), VMESS_AUTH_LENGTH + 1);
+        GByteArray* auth = wmem_new(wmem_file_scope(), GByteArray);
         GByteArray* secret = wmem_new(wmem_file_scope(), GByteArray); /* We use byte array to store the hex-formed secrets. */
         GHashTable* ht = NULL;
 
@@ -533,7 +540,7 @@ void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key
             hex_auth = g_match_info_fetch_named(mi, g->re_group_name);
             if (hex_auth && *hex_auth) {
                 ht = g->key_ht;
-                from_hex_raw(hex_auth, auth, strlen(hex_auth));
+                from_hex(hex_auth, auth, strlen(hex_auth));
                 from_hex(hex_secret, secret, strlen(hex_secret));
                 g_free(hex_auth);
                 g_free(hex_secret);
@@ -859,14 +866,51 @@ vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, 
     return err;
 }
 
+/**
+ * vmess_equal and vmess_hash are stolen from packet-tls-utils.c
+ */
+gboolean vmess_equal(gconstpointer a, gconstpointer b) {
+    const GByteArray* val1;
+    const GByteArray* val2;
+    val1 = (const GByteArray*)a;
+    val2 = (const GByteArray*)b;
+
+    if (val1->len == val2->len &&
+        !memcmp(val1->data, val2->data, val2->len)) {
+        return 1;
+    }
+    return 0;
+};
+
+guint vmess_hash(gconstpointer v) {
+    const GByteArray* arr;
+    guint l, hash;
+    const guint* cur;
+    hash = 0;
+    arr = (const GByteArray*)v;
+
+    /*  id and id->data are mallocated in ssl_save_master_key().  As such 'data'
+     *  should be aligned for any kind of access (for example as a guint as
+     *  is done below).  The intermediate void* cast is to prevent "cast
+     *  increases required alignment of target type" warnings on CPUs (such
+     *  as SPARCs) that do not allow misaligned memory accesses.
+     */
+    cur = (const guint*)(void*)arr->data;
+
+    for (l = 4; (l < arr->len); l += 4, cur++)
+        hash = hash ^ (*cur);
+
+    return hash;
+}
+
 void vmess_common_init(vmess_key_map_t* km)
 {
     // Use wmem to manage memory, instead of using g_free.
-    km->data_iv = g_hash_table_new(g_str_hash, g_str_equal);
-    km->data_key = g_hash_table_new(g_str_hash, g_str_equal);
-    km->header_iv = g_hash_table_new(g_str_hash, g_str_equal);
-    km->header_key = g_hash_table_new(g_str_hash, g_str_equal);
-    km->response_token = g_hash_table_new(g_str_hash, g_str_equal);
+    km->data_iv = g_hash_table_new(vmess_hash, vmess_equal);
+    km->data_key = g_hash_table_new(vmess_hash, vmess_equal);
+    km->header_iv = g_hash_table_new(vmess_hash, vmess_equal);
+    km->header_key = g_hash_table_new(vmess_hash, vmess_equal);
+    km->response_token = g_hash_table_new(vmess_hash, vmess_equal);
 }
 
 void vmess_init(void)
@@ -1008,6 +1052,18 @@ void
 proto_register_vmess(void)
 {
     module_t* vmess_module;
+
+    /* Initialize key derive labels */
+    kdfSaltConstAuthIDEncryptionKey = g_string_new_take("AES Auth ID Encryption");
+    kdfSaltConstAEADRespHeaderLenKey = g_string_new_take("AEAD Resp Header Len Key");
+    kdfSaltConstAEADRespHeaderLenIV = g_string_new_take("AEAD Resp Header Len IV");
+    kdfSaltConstAEADRespHeaderPayloadKey = g_string_new_take("AEAD Resp Header Key");
+    kdfSaltConstAEADRespHeaderPayloadIV = g_string_new_take("AEAD Resp Header IV");
+    kdfSaltConstVMessAEADKDF = g_string_new_take("VMess AEAD KDF");
+    kdfSaltConstVMessHeaderPayloadAEADKey = g_string_new_take("VMess Header AEAD Key");
+    kdfSaltConstVMessHeaderPayloadAEADIV = g_string_new_take("VMess Header AEAD Nonce");
+    kdfSaltConstVMessHeaderPayloadLengthAEADKey = g_string_new_take("VMess Header AEAD Key_Length");
+    kdfSaltConstVMessHeaderPayloadLengthAEADIV = g_string_new_take("VMess Header AEAD Nonce_Length");
 
     static hf_register_info hf[] = {
         { &hf_vmess_request_auth,

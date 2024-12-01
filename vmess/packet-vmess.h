@@ -62,16 +62,16 @@ void vmess_free(gpointer data);
 #define GCM_TAG_SIZE 16
 #define POLY1305_TAG_SIZE 16
 
-extern const char* kdfSaltConstAuthIDEncryptionKey;
-extern const char* kdfSaltConstAEADRespHeaderLenKey;
-extern const char* kdfSaltConstAEADRespHeaderLenIV;
-extern const char* kdfSaltConstAEADRespHeaderPayloadKey;
-extern const char* kdfSaltConstAEADRespHeaderPayloadIV;
-extern const char* kdfSaltConstVMessAEADKDF;
-extern const char* kdfSaltConstVMessHeaderPayloadAEADKey;
-extern const char* kdfSaltConstVMessHeaderPayloadAEADIV;
-extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADKey;
-extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
+//extern const char* kdfSaltConstAuthIDEncryptionKey;
+//extern const char* kdfSaltConstAEADRespHeaderLenKey;
+//extern const char* kdfSaltConstAEADRespHeaderLenIV;
+//extern const char* kdfSaltConstAEADRespHeaderPayloadKey;
+//extern const char* kdfSaltConstAEADRespHeaderPayloadIV;
+//extern const char* kdfSaltConstVMessAEADKDF;
+//extern const char* kdfSaltConstVMessHeaderPayloadAEADKey;
+//extern const char* kdfSaltConstVMessHeaderPayloadAEADIV;
+//extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADKey;
+//extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
 
 typedef struct _vmess_key_map_t {
     GHashTable* header_key;
@@ -307,7 +307,7 @@ typedef struct _vmess_conv_t {
     VMessDecoder* header_len_decoder;
     VMessDecoder* header_decoder;
     VMessDecoder* data_decoder;
-    gchar* auth;
+    GByteArray* auth;
     /* Used to speed up desegmenting of chunked Transfer-Encoding. */
     wmem_map_t* chunk_offsets_fwd;
     wmem_map_t* chunk_offsets_rev;

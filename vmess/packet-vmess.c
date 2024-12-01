@@ -60,6 +60,8 @@ static int proto_vmess;
 
 /****************VMess Fields******************/
 static int hf_vmess_request_auth;
+static int hf_vmess_request_length;
+static int hf_vmess_request_conn_nonce;
 static int hf_vmess_response_header;
 static int hf_vmess_payload_length;
 
@@ -134,9 +136,17 @@ const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV = "VMess Header AEAD Nonc
  * @param conv_data     The conversation data related to the current VMess conversation.
  */
 static gboolean
-decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
+decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
     GByteArray* header_key = g_hash_table_lookup(vmess_key_map.header_key, conv_data->auth);
+    if (header_key == NULL) {
+        vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
+        return false; /* Decryption failed */
+    }
     GByteArray* header_iv = g_hash_table_lookup(vmess_key_map.header_iv, conv_data->auth);
+    if (header_iv == NULL) {
+        vmess_debug_printf("VMess IV not found, impossible to decrypt.\n");
+        return false; /* Decryption failed */
+    }
 
     /* Convert the IV to char* type, which is required by vmess_kdf */
     gchar* connectionNonce = g_malloc(header_iv->len + 1);
@@ -144,7 +154,10 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_c
     connectionNonce[header_iv->len] = '\0';
 
     guchar* payloadHeaderLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
-    guchar* payloadHeaderLengthAEADNonce = g_malloc(GCM_IV_SIZE);
+    /* payloadHeaderLengthAEADNonce should have the same liftspan as the decoder.
+     * See https://docs.gtk.org/glib/type_func.ByteArray.append.html
+     */
+    guchar* payloadHeaderLengthAEADNonce = wmem_alloc(wmem_file_scope(), GCM_IV_SIZE);
     guchar* tmp_derived_key;
     
     /* Initialize the header_len_decoder */
@@ -173,11 +186,22 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_c
                                             AEADPayloadLengthSerializedByte,
                                             aeadPayloadLengthSize,
                                             conv_data->auth, strlen(conv_data->auth));
-    /* TODO: Error handling and check length decryption. */
     if (err != 0) {
         vmess_debug_printf("Decryption failed: %s.\n", gcry_strsource(err));
         return false; /* Decryption failed */
     }
+    /* DO NOT free the payloadHeaderLengthAEADNonce. */
+    g_free(payloadHeaderLengthAEADKey);
+    g_free(connectionNonce);
+
+    /* Add the connectionNonce to the tree */
+    proto_tree_add_item(tree, hf_vmess_request_conn_nonce, tvb, 34, 8, ENC_BIG_ENDIAN);
+    /* Add the decrypted length buffer to the tree */
+
+    /* TODO: Header decryption. */
+    /* Get the length of header. */
+    //guint aeadPayloadLength = (guint)AEADPayloadLengthSerializedByte[0] << 8 | (guint)AEADPayloadLengthSerializedByte[1];
+    //proto_tree_add_item(tree, hf_vmess_request_length, tvb, 0, 16, ENC_BIG_ENDIAN);
 
     return true;
 }
@@ -197,10 +221,10 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
     /* If the header packet is decrypted, try to perform decryption */
-    if (!conv_data->req_decrypted){
-        gboolean success = decrypt_vmess_request(tvb, pinfo, 0, conv_data);
-        if (!success) return 0; /* Give up decryption upon failure. */
-    }
+    //if (!conv_data->req_decrypted){
+    //    gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, 0, conv_data);
+    //    if (!success) return 0; /* Give up decryption upon failure. */
+    //}
 
     return 0;
 }
@@ -302,6 +326,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth, (VMESS_AUTH_LENGTH + 1));
+        //gchar* tmp_auth = "004a1703030045848e8d66c95b5a3528";
         GByteArray* key = (GByteArray *)g_hash_table_lookup(vmess_key_map.header_key, tmp_auth);
         if (key) {
             if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) {
@@ -988,6 +1013,18 @@ proto_register_vmess(void)
         { &hf_vmess_request_auth,
             {"VMess Request Auth", "vmess.request.auth",
             FT_BYTES, BASE_NONE,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_conn_nonce,
+            {"VMess Request Connection Nonce", "vmess.request.conn_nonce",
+            FT_BYTES, BASE_NONE,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_length,
+            {"VMess Request Length", "vmess.request.length",
+            FT_UINT16, BASE_DEC,
             NULL, 0x0,
             NULL, HFILL }
         },

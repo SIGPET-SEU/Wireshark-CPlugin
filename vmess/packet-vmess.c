@@ -338,7 +338,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 conv_data->auth = g_string_append_len(conv_data->auth, key->str, key->len);
             }
             is_request = true;
-            g_string_free(key, true);
         }
         g_string_free(tmp_auth, true);
     }

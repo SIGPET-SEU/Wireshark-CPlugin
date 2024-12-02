@@ -449,7 +449,7 @@ gint mem_search(const char* haystack, guint haystack_size, const char* needle, g
  *
  * @return  TRUE if succeeded, FALSE otherwise.
  */
-gboolean from_hex(const char* in, GByteArray* out, guint datalen);
+gboolean from_hex(const char* in, GString* out, guint datalen);
 
 /**
  * This is the raw char* version of from_hex, used for handling the raw bytes

@@ -327,22 +327,20 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
         gchar* tmp_auth_raw_data = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth_raw_data, (VMESS_AUTH_LENGTH + 1));
 
-        GByteArray* tmp_auth = g_byte_array_new();
-        memcpy(tmp_auth->data, tmp_auth_raw_data, VMESS_AUTH_LENGTH);
-        tmp_auth->len = VMESS_AUTH_LENGTH;
+        GString* tmp_auth = g_string_new_len(tmp_auth_raw_data, VMESS_AUTH_LENGTH);
         g_free(tmp_auth_raw_data);
 
-        GByteArray* key = (GByteArray *)g_hash_table_lookup(vmess_key_map.header_key, tmp_auth);
+        GString* key = (GString*)g_hash_table_lookup(vmess_key_map.header_key, tmp_auth);
         if (key) {
             if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) {
                 /* Only when the auth is found should we create a auth in file scope */
-                conv_data->auth = wmem_new0(wmem_file_scope(), GByteArray);
-                conv_data->auth->len = tmp_auth->len;
-                memcpy(conv_data->auth->data, tmp_auth->data, tmp_auth->len);
+                conv_data->auth = wmem_new0(wmem_file_scope(), GString);
+                conv_data->auth = g_string_append_len(conv_data->auth, key->str, key->len);
             }
             is_request = true;
-            g_byte_array_free(tmp_auth, true);
+            g_string_free(key, true);
         }
+        g_string_free(tmp_auth, true);
     }
 
     if (is_request) {
@@ -525,8 +523,8 @@ void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key
         /* Note that the secret read in is in plaintext form, it should be converted into hex form later. */
         gchar* hex_secret;
         gchar* hex_auth;
-        GByteArray* auth = wmem_new(wmem_file_scope(), GByteArray);
-        GByteArray* secret = wmem_new(wmem_file_scope(), GByteArray); /* We use byte array to store the hex-formed secrets. */
+        GString* auth = wmem_new(wmem_file_scope(), GString);
+        GString* secret = wmem_new(wmem_file_scope(), GString); /* We use byte array to store the hex-formed secrets. */
         GHashTable* ht = NULL;
 
         hex_secret = g_match_info_fetch_named(mi, "secret");
@@ -543,10 +541,11 @@ void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key
                 from_hex(hex_auth, auth, strlen(hex_auth));
                 from_hex(hex_secret, secret, strlen(hex_secret));
                 g_free(hex_auth);
-                g_free(hex_secret);
                 break;
             }
+            g_free(hex_auth);
         }
+        g_free(hex_secret);
         g_hash_table_insert(ht, auth, secret);
     }
     else if (linelen > 0 && line[0] != '#') {
@@ -603,8 +602,8 @@ vmess_decoder_new(int algo, int mode, guchar* key, guchar* iv, guint flags) {
     }
     vmess_cipher_init(&decoder->evp, algo, mode, key, key_len, iv, iv_len, flags);
     /* Save IV for possible cipher reset */
-    decoder->write_iv = wmem_new0(wmem_file_scope(), GByteArray);
-    decoder->write_iv = g_byte_array_append(decoder->write_iv, iv, iv_len);
+    decoder->write_iv = wmem_new0(wmem_file_scope(), GString);
+    decoder->write_iv = g_string_append_len(decoder->write_iv, iv, iv_len);
     return decoder;
 }
 
@@ -810,12 +809,12 @@ hmac_digest_on_copy(gcry_md_hd_t hd, const guchar* msg, gssize msg_len, guchar* 
 guchar* vmess_kdf(const guchar* key, guint key_len, guint num, ...) {
 
     HMACCreator* creator = hmac_creator_new(NULL,
-        (const guchar*)kdfSaltConstVMessAEADKDF,
-        strlen(kdfSaltConstVMessAEADKDF));
+        (const guchar*)kdfSaltConstVMessAEADKDF->str,
+        kdfSaltConstVMessAEADKDF->len);
     va_list valist;
     va_start(valist, num);
     for (guint i = 0; i < num; i++) {
-        GString* path = va_arg(valist, const GString*);
+        const GString* path = va_arg(valist, const GString*);
         creator = hmac_creator_new(creator, (const guchar*)path->str, path->len);
     }
     va_end(valist);
@@ -1014,11 +1013,10 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 
 #endif
 
-gboolean from_hex(const char* in, GByteArray* out, guint datalen) {
+gboolean from_hex(const char* in, GString* out, guint datalen) {
     if (datalen & 1) /* The datalen should never be odd */
         return FALSE;
-    out->len = datalen / 2;
-    out->data = (guchar*)wmem_alloc(wmem_file_scope(), datalen / 2);
+
     gsize i;
 
     for (i = 0; i < datalen; i += 2) {
@@ -1026,7 +1024,7 @@ gboolean from_hex(const char* in, GByteArray* out, guint datalen) {
         a = ws_xton(in[i]), b = ws_xton(in[i + 1]);
         if (a == -1 || b == -1)
             return FALSE;
-        out->data[i / 2] = (guint8)(a << 4 | b);
+        g_string_append_c(out, (guint8)(a << 4 | b));
     }
     return TRUE;
 }
@@ -1044,7 +1042,7 @@ gboolean from_hex_raw(const char* in, gchar * out, guint datalen)
             return FALSE;
         out[i / 2] = (guint8)(a << 4 | b);
     }
-    out[datalen / 2 + 1] = '\0';
+    out[datalen / 2] = '\0';
     return TRUE;
 }
 

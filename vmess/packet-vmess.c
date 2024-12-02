@@ -137,12 +137,12 @@ static GString* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
  */
 static gboolean
 decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
-    GString* req_key = g_hash_table_lookup(vmess_key_map.header_key, conv_data->auth);
+    GString* req_key = (GString *)g_hash_table_lookup(vmess_key_map.header_key, conv_data->auth);
     if (req_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
         return false; /* Decryption failed */
     }
-    GString* req_iv = g_hash_table_lookup(vmess_key_map.header_iv, conv_data->auth);
+    GString* req_iv = (GString*)g_hash_table_lookup(vmess_key_map.header_iv, conv_data->auth);
     if (req_iv == NULL) {
         vmess_debug_printf("VMess IV not found, impossible to decrypt.\n");
         return false; /* Decryption failed */
@@ -190,13 +190,15 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         vmess_debug_printf("Decryption failed: %s.\n", gcry_strsource(err));
         return false; /* Decryption failed */
     }
+    tvbuff_t* length_tvb = tvb_new_child_real_data(tvb, AEADPayloadLengthSerializedByte, aeadPayloadLengthSize, aeadPayloadLengthSize);
+    guint16 aeadPayloadLength = tvb_get_guint16(length_tvb, 0, ENC_BIG_ENDIAN);
     /* DO NOT free the payloadHeaderLengthAEADNonce. */
     g_free(payloadHeaderLengthAEADKey);
 
     /* Add the connectionNonce to the tree */
     proto_tree_add_item(tree, hf_vmess_request_conn_nonce, tvb, 34, 8, ENC_BIG_ENDIAN);
     /* Add the decrypted length buffer to the tree */
-
+    proto_tree_add_uint(tree, hf_vmess_request_length, length_tvb, 0, aeadPayloadLengthSize, aeadPayloadLength);
     /* TODO: Header decryption. */
     /* Get the length of header. */
     //guint aeadPayloadLength = (guint)AEADPayloadLengthSerializedByte[0] << 8 | (guint)AEADPayloadLengthSerializedByte[1];
@@ -220,10 +222,11 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
     /* If the header packet is decrypted, try to perform decryption */
-    //if (!conv_data->req_decrypted){
-    //    gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, 0, conv_data);
-    //    if (!success) return 0; /* Give up decryption upon failure. */
-    //}
+    if (!conv_data->req_decrypted){
+        gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, 0, conv_data);
+        if (!success) return 0; /* Give up decryption upon failure. */
+        conv_data->req_decrypted = TRUE;
+    }
 
     return 0;
 }

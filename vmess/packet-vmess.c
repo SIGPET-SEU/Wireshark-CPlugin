@@ -123,10 +123,10 @@ static GString* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
  * When we successfully decrypt the actual length, we fetch its value (Len), which is used for header decryption.
  * 
  * The actual decryption algorithm for this routine runs as follows:
- * 1. Initialize the header_len_decoder and header_decoder separately, using vmess_kdf for key derivation;
- * 2. Fetch the pointer to tvb+16 with length=18, and perform header length decryption using header_len_decoder;
+ * 1. Initialize the req_length_decoder and req_decoder separately, using vmess_kdf for key derivation;
+ * 2. Fetch the pointer to tvb+16 with length=18, and perform header length decryption using req_length_decoder;
  * 3. Add the actual header length to the dissect tree;
- * 4. Fetch the pointer to tvb+42 with length=Len+16, and perform header decryption using header_decoder;
+ * 4. Fetch the pointer to tvb+42 with length=Len+16, and perform header decryption using req_decoder;
  * 5. Dissect the decrypted header, and append necessary information to the dissect tree;
  * 6. Add the decrypted header bytes to a new tab.
  * 
@@ -137,21 +137,21 @@ static GString* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
  */
 static gboolean
 decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
-    GByteArray* header_key = g_hash_table_lookup(vmess_key_map.header_key, conv_data->auth);
-    if (header_key == NULL) {
+    GString* req_key = g_hash_table_lookup(vmess_key_map.header_key, conv_data->auth);
+    if (req_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
         return false; /* Decryption failed */
     }
-    GByteArray* header_iv = g_hash_table_lookup(vmess_key_map.header_iv, conv_data->auth);
-    if (header_iv == NULL) {
+    GString* req_iv = g_hash_table_lookup(vmess_key_map.header_iv, conv_data->auth);
+    if (req_iv == NULL) {
         vmess_debug_printf("VMess IV not found, impossible to decrypt.\n");
         return false; /* Decryption failed */
     }
 
-    /* Convert the IV to char* type, which is required by vmess_kdf */
-    gchar* connectionNonce = g_malloc(header_iv->len + 1);
-    memcpy(connectionNonce, header_iv->data, header_iv->len);
-    connectionNonce[header_iv->len] = '\0';
+    ///* Convert the IV to char* type, which is required by vmess_kdf */
+    //GString* connectionNonce = g_malloc(header_iv->len + 1);
+    //memcpy(connectionNonce, header_iv->data, header_iv->len);
+    //connectionNonce[header_iv->len] = '\0';
 
     guchar* payloadHeaderLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
     /* payloadHeaderLengthAEADNonce should have the same liftspan as the decoder.
@@ -160,27 +160,27 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     guchar* payloadHeaderLengthAEADNonce = wmem_alloc(wmem_file_scope(), GCM_IV_SIZE);
     guchar* tmp_derived_key;
     
-    /* Initialize the header_len_decoder */
-    tmp_derived_key = vmess_kdf(header_key->data, header_key->len, 3,
+    /* Initialize the request_len_decoder */
+    tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
         kdfSaltConstVMessHeaderPayloadLengthAEADKey,
         conv_data->auth,
-        connectionNonce);
+        req_iv);
     memcpy(payloadHeaderLengthAEADKey, tmp_derived_key, AES_128_KEY_SIZE);
     g_free(tmp_derived_key);
 
-    tmp_derived_key = vmess_kdf(header_key->data, header_key->len, 3,
+    tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
         kdfSaltConstVMessHeaderPayloadLengthAEADIV,
         conv_data->auth,
-        connectionNonce);
+        req_iv);
     memcpy(payloadHeaderLengthAEADNonce, tmp_derived_key, GCM_IV_SIZE);
     g_free(tmp_derived_key);
 
-    conv_data->header_len_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
+    conv_data->req_length_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
                                     payloadHeaderLengthAEADKey, payloadHeaderLengthAEADNonce, 0);
     guint aeadPayloadLengthSize = 2;
     guchar* AEADPayloadLengthSerializedByte = g_malloc(aeadPayloadLengthSize);
 
-    gcry_error_t err = vmess_byte_decryption(conv_data->header_len_decoder,
+    gcry_error_t err = vmess_byte_decryption(conv_data->req_length_decoder,
                                             tvb_get_ptr(tvb, 16, aeadPayloadLengthSize + 16),
                                             aeadPayloadLengthSize + 16,
                                             AEADPayloadLengthSerializedByte,
@@ -192,7 +192,6 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     }
     /* DO NOT free the payloadHeaderLengthAEADNonce. */
     g_free(payloadHeaderLengthAEADKey);
-    g_free(connectionNonce);
 
     /* Add the connectionNonce to the tree */
     proto_tree_add_item(tree, hf_vmess_request_conn_nonce, tvb, 34, 8, ENC_BIG_ENDIAN);

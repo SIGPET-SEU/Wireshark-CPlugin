@@ -198,7 +198,7 @@ typedef struct {
 
 //typedef struct {
 //    VMessDecoder header_len_decoder;
-//    VMessDecoder header_decoder;
+//    VMessDecoder req_decoder;
 //    VMessDecoder data_decoder;
 //} vmess_decrypt_info_t;
 
@@ -304,8 +304,8 @@ typedef struct _vmess_conv_t {
     gboolean resp_decrypted;    /* Used to check if the Response Header is decrypted */
     streaming_reassembly_info_t* reassembly_info;
     //vmess_decrypt_info_t* vmess_decrypt_info;
-    VMessDecoder* header_len_decoder;
-    VMessDecoder* header_decoder;
+    VMessDecoder* req_length_decoder;
+    VMessDecoder* req_decoder;
     VMessDecoder* data_decoder;
     GString* auth;
     /* Used to speed up desegmenting of chunked Transfer-Encoding. */

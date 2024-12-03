@@ -137,21 +137,21 @@ static GString* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
  */
 static gboolean
 decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
-    GString* req_key = (GString *)g_hash_table_lookup(vmess_key_map.header_key, conv_data->auth);
+    GString* req_key = (GString *)g_hash_table_lookup(vmess_key_map.req_key, conv_data->auth);
     if (req_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
         return false; /* Decryption failed */
     }
-    GString* req_iv = (GString*)g_hash_table_lookup(vmess_key_map.header_iv, conv_data->auth);
+    GString* req_iv = (GString*)g_hash_table_lookup(vmess_key_map.req_iv, conv_data->auth);
     if (req_iv == NULL) {
         vmess_debug_printf("VMess IV not found, impossible to decrypt.\n");
         return false; /* Decryption failed */
     }
 
     ///* Convert the IV to char* type, which is required by vmess_kdf */
-    //GString* connectionNonce = g_malloc(header_iv->len + 1);
-    //memcpy(connectionNonce, header_iv->data, header_iv->len);
-    //connectionNonce[header_iv->len] = '\0';
+    //GString* connectionNonce = g_malloc(req_iv->len + 1);
+    //memcpy(connectionNonce, req_iv->data, req_iv->len);
+    //connectionNonce[req_iv->len] = '\0';
 
     guchar* payloadHeaderLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
     /* payloadHeaderLengthAEADNonce should have the same liftspan as the decoder.
@@ -190,15 +190,48 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         vmess_debug_printf("Decryption failed: %s.\n", gcry_strsource(err));
         return false; /* Decryption failed */
     }
-    tvbuff_t* length_tvb = tvb_new_child_real_data(tvb, AEADPayloadLengthSerializedByte, aeadPayloadLengthSize, aeadPayloadLengthSize);
-    guint16 aeadPayloadLength = tvb_get_guint16(length_tvb, 0, ENC_BIG_ENDIAN);
+    //tvbuff_t* length_tvb = tvb_new_child_real_data(tvb, AEADPayloadLengthSerializedByte, aeadPayloadLengthSize, aeadPayloadLengthSize);
+    //guint16 aeadPayloadLength = tvb_get_guint16(length_tvb, 0, ENC_BIG_ENDIAN);
     /* DO NOT free the payloadHeaderLengthAEADNonce. */
     g_free(payloadHeaderLengthAEADKey);
 
-    /* Add the connectionNonce to the tree */
-    proto_tree_add_item(tree, hf_vmess_request_conn_nonce, tvb, 34, 8, ENC_BIG_ENDIAN);
+    /* Get the length of header. */
+    guint aeadPayloadLength = (guint)AEADPayloadLengthSerializedByte[0] << 8 | (guint)AEADPayloadLengthSerializedByte[1];
+
+    /**
+     * TODO: Save the decrypted data into some structure for later use.
+     * Decryption happens on the first pass, while proto_tree display
+     * happens on the second pass.
+     */
+
+    /* It seems that key=0 in p_add_proto_data is enough for VMess */
+    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+    if (!packet) {
+        packet = wmem_new0(wmem_file_scope(), vmess_packet_info_t);
+        packet->from_server = FALSE;
+        packet->messages = NULL;
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
+    }
+
+    gint record_id = tvb_raw_offset(tvb) + offset;
+
+    vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
+    message->type = VMESS_REQUEST;
+    message->data_len = aeadPayloadLength;
+    message->id = 0; /* Should be record_id, set to 0 for testing purpose */
+
+    vmess_message_info_t** pmessages = &packet->messages;
+    while (*pmessages) /* Iterate to the tail */
+        pmessages = &(*pmessages)->next;
+    *pmessages = message; /* Append to the tail */
+
+    
     /* Add the decrypted length buffer to the tree */
-    proto_tree_add_uint(tree, hf_vmess_request_length, length_tvb, 0, aeadPayloadLengthSize, aeadPayloadLength);
+
+
+    
+
+    //proto_tree_add_uint(tree, hf_vmess_request_length, length_tvb, 0, aeadPayloadLengthSize, aeadPayloadLength);
     /* TODO: Header decryption. */
     /* Get the length of header. */
     //guint aeadPayloadLength = (guint)AEADPayloadLengthSerializedByte[0] << 8 | (guint)AEADPayloadLengthSerializedByte[1];
@@ -213,7 +246,8 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     proto_item* ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     proto_tree* vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_request_auth, tvb, 0, 16, ENC_BIG_ENDIAN);
-
+    /* Add the connectionNonce to the tree */
+    proto_tree_add_item(tree, hf_vmess_request_conn_nonce, tvb, 34, 8, ENC_BIG_ENDIAN);
     conversation_t* conversation;
     vmess_conv_t* conv_data;
     /* get conversation, create if necessary*/
@@ -227,6 +261,8 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
         if (!success) return 0; /* Give up decryption upon failure. */
         conv_data->req_decrypted = TRUE;
     }
+
+    /* TODO: vmess_get_message */
 
     return 0;
 }
@@ -332,12 +368,12 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
         GString* tmp_auth = g_string_new_len(tmp_auth_raw_data, VMESS_AUTH_LENGTH);
         g_free(tmp_auth_raw_data);
 
-        GString* key = (GString*)g_hash_table_lookup(vmess_key_map.header_key, tmp_auth);
+        GString* key = (GString*)g_hash_table_lookup(vmess_key_map.req_key, tmp_auth);
         if (key) {
             if (!PINFO_FD_VISITED(pinfo) && !conv_data->auth) {
                 /* Only when the auth is found should we create a auth in file scope */
                 conv_data->auth = wmem_new0(wmem_file_scope(), GString);
-                conv_data->auth = g_string_append_len(conv_data->auth, key->str, key->len);
+                conv_data->auth = g_string_append_len(conv_data->auth, tmp_auth->str, tmp_auth->len);
             }
             is_request = true;
         }
@@ -467,8 +503,8 @@ void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key
     ws_noisy("vmess process line: %s", data);
 
     vmess_key_match_group_t km_group[] = {
-        {"header_key", km->header_key},
-        {"header_iv", km->header_iv},
+        {"header_key", km->req_key},
+        {"header_iv", km->req_iv},
         {"data_key", km->data_key},
         {"data_iv", km->data_iv},
         {"response_token", km->response_token}
@@ -565,8 +601,8 @@ void vmess_keylog_remove(vmess_key_map_t* mk)
 {
     g_hash_table_remove_all(mk->data_iv);
     g_hash_table_remove_all(mk->data_key);
-    g_hash_table_remove_all(mk->header_iv);
-    g_hash_table_remove_all(mk->header_key);
+    g_hash_table_remove_all(mk->req_iv);
+    g_hash_table_remove_all(mk->req_key);
     g_hash_table_remove_all(mk->response_token);
 }
 
@@ -906,10 +942,10 @@ vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, 
 void vmess_common_init(vmess_key_map_t* km)
 {
     // Use wmem to manage memory, instead of using g_free.
+    km->req_iv = g_hash_table_new(g_string_hash, g_string_equal);
+    km->req_key = g_hash_table_new(g_string_hash, g_string_equal);
     km->data_iv = g_hash_table_new(g_string_hash, g_string_equal);
     km->data_key = g_hash_table_new(g_string_hash, g_string_equal);
-    km->header_iv = g_hash_table_new(g_string_hash, g_string_equal);
-    km->header_key = g_hash_table_new(g_string_hash, g_string_equal);
     km->response_token = g_hash_table_new(g_string_hash, g_string_equal);
 }
 
@@ -927,8 +963,8 @@ void vmess_common_clean(vmess_key_map_t* km)
 {
     g_hash_table_destroy(km->data_iv);
     g_hash_table_destroy(km->data_key);
-    g_hash_table_destroy(km->header_iv);
-    g_hash_table_destroy(km->header_key);
+    g_hash_table_destroy(km->req_iv);
+    g_hash_table_destroy(km->req_key);
     g_hash_table_destroy(km->response_token);
 }
 
@@ -1190,6 +1226,11 @@ proto_reg_handoff_vmess(void)
 #endif
     tls_handle = find_dissector("tls");
     dissector_add_uint("tcp.port", VMESS_TCP_PORT, vmess_handle);
+}
+
+vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id)
+{
+    return NULL;
 }
 
 vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess)

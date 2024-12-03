@@ -74,8 +74,8 @@ void vmess_free(gpointer data);
 //extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
 
 typedef struct _vmess_key_map_t {
-    GHashTable* header_key;
-    GHashTable* header_iv;
+    GHashTable* req_key;
+    GHashTable* req_iv;
     GHashTable* data_key;
     GHashTable* data_iv;
     GHashTable* response_token; // Check if the response matches the request.
@@ -339,6 +339,31 @@ typedef struct _vmess_conv_t {
     GSList* req_list;
     wmem_map_t* matches_table;
 } vmess_conv_t;
+
+/* VMess record type */
+typedef enum {
+    VMESS_REQUEST,
+    VMESS_RESPONSE,
+    VMESS_DATA,
+} VMessRecordType;
+
+/* Used to record decrypted messages for dissection. Ref: packet-ssh.c */
+typedef struct _vmess_message_info_t {
+    guchar* plain_data;     /**< Decrypted data. */
+    guint   data_len;       /**< Length of decrypted data. */
+    gint    id;             /**< Identifies the exact message within a frame
+                                 (there can be multiple records in a frame). */
+    struct _vmess_message_info_t* next;
+    VMessRecordType type;
+} vmess_message_info_t;
+
+typedef struct {
+    gboolean from_server;
+    vmess_message_info_t* messages;
+} vmess_packet_info_t;
+
+/**  */
+vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id);
 
 /**
  * Encapsulate the conv_data fetching process:

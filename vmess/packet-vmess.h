@@ -62,17 +62,6 @@ void vmess_free(gpointer data);
 #define GCM_TAG_SIZE 16
 #define POLY1305_TAG_SIZE 16
 
-//extern const char* kdfSaltConstAuthIDEncryptionKey;
-//extern const char* kdfSaltConstAEADRespHeaderLenKey;
-//extern const char* kdfSaltConstAEADRespHeaderLenIV;
-//extern const char* kdfSaltConstAEADRespHeaderPayloadKey;
-//extern const char* kdfSaltConstAEADRespHeaderPayloadIV;
-//extern const char* kdfSaltConstVMessAEADKDF;
-//extern const char* kdfSaltConstVMessHeaderPayloadAEADKey;
-//extern const char* kdfSaltConstVMessHeaderPayloadAEADIV;
-//extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADKey;
-//extern const char* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
-
 typedef struct _vmess_key_map_t {
     GHashTable* req_key;
     GHashTable* req_iv;
@@ -174,13 +163,6 @@ void vmess_common_clean(vmess_key_map_t* km);
 /* Used to initialize the VMess key map. */
 void vmess_common_init(vmess_key_map_t* km);
 
-//typedef enum {
-//    MODE_NONE,      /* No encryption, for debug only */
-//    MODE_CFB,       /* CFB mode */
-//    MODE_GCM,       /* GenericAEADCipher */
-//    MODE_POLY1305,  /* AEAD_CHACHA20_POLY1305 with 16 byte auth tag (RFC 7905) */
-//} vmess_cipher_mode_t;
-
 typedef struct vmess_cipher_suite {
     enum gcry_cipher_modes mode;
     enum gcry_cipher_algos algo;
@@ -195,12 +177,6 @@ typedef struct {
     const vmess_cipher_suite_t* cipher_suite;
     VMESS_CIPHER_CTX evp;
 } VMessDecoder;
-
-//typedef struct {
-//    VMessDecoder header_len_decoder;
-//    VMessDecoder req_decoder;
-//    VMessDecoder data_decoder;
-//} vmess_decrypt_info_t;
 
 typedef struct vmess_master_key_match_group {
     const char* re_group_name;
@@ -272,31 +248,8 @@ vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, 
 
 
 /* Reassembly related structures and routines */
-
-// reassembly table for streaming chunk mode
+// reassembly table 
 static reassembly_table proto_vmess_streaming_reassembly_table;
-
-/** information about a request and response on a VMess conversation. */
-typedef struct _vmess_req_res_t {
-    /** the running number on the conversation */
-    guint32 number;
-    /** frame number of the request */
-    guint32 req_framenum;
-    /** frame number of the corresponding response */
-    guint32 res_framenum;
-    /** timestamp of the request */
-    //nstime_t req_ts;
-    //guint    response_code;
-    //gchar* request_method;
-    //gchar* vmess_host;
-    //gchar* request_uri;
-    //gchar* full_uri;
-    gboolean req_has_range;
-    gboolean resp_has_range;
-
-    /** private data used by vmess dissector */
-    void* private_data;
-} vmess_req_res_t;
 
 typedef struct _vmess_conv_t {
     gboolean req_decrypted;     /* Used to check if the VMess header is decrypted */
@@ -308,36 +261,11 @@ typedef struct _vmess_conv_t {
     VMessDecoder* req_decoder;
     VMessDecoder* data_decoder;
     GString* auth;
-    /* Used to speed up desegmenting of chunked Transfer-Encoding. */
-    wmem_map_t* chunk_offsets_fwd;
-    wmem_map_t* chunk_offsets_rev;
 
     /* Fields related to proxied/tunneled/Upgraded connections. */
     guint32	 startframe;	/* First frame of proxied connection */
     int    	 startoffset;	/* Offset within the frame where the new protocol begins. */
     dissector_handle_t next_handle;	/* New protocol */
-
-    gchar* websocket_protocol;	/* Negotiated WebSocket protocol */
-    gchar* websocket_extensions;	/* Negotiated WebSocket extensions */
-    /* Server address and port, known after first server response */
-    guint16 server_port;
-    address server_addr;
-    /** the tail node of req_res */
-    vmess_req_res_t* req_res_tail;
-    /** Information from the last request or response can
-     * be found in the tail node. It is only sensible to look
-     * at on the first (sequential) pass, or after startframe /
-     * startoffset on connections that have proxied/tunneled/Upgraded.
-     */
-
-     /* TRUE means current message is chunked streaming, and not ended yet.
-      * This is only meaningful during the first scan.
-      */
-    gboolean message_ended;
-
-    /* Used for req/res matching */
-    GSList* req_list;
-    wmem_map_t* matches_table;
 } vmess_conv_t;
 
 /* VMess record type */
@@ -362,7 +290,9 @@ typedef struct {
     vmess_message_info_t* messages;
 } vmess_packet_info_t;
 
-/**  */
+/**
+ * Fetch the VMess message from the packet attached to pinfo.
+ */
 vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id);
 
 /**
@@ -380,26 +310,6 @@ vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id);
  * into a single routine.
  */
 vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess);
-
-/* request or response streaming reassembly data */
-typedef struct {
-    /* reassembly information only for request or response with chunked and streaming data */
-    streaming_reassembly_info_t* streaming_reassembly_info;
-    /* subdissector handler for request or response with chunked and streaming data */
-    dissector_handle_t streaming_handle;
-    /* message being passed to subdissector if the request or response has chunked and streaming data */
-    //media_content_info_t* content_info;
-    //headers_t* main_headers;
-} vmess_streaming_reassembly_data_t;
-
-/* vmess request or response private data */
-typedef struct {
-    /* direction of request message */
-    int req_fwd_flow;
-    /* request or response streaming reassembly data */
-    vmess_streaming_reassembly_data_t* req_streaming_reassembly_data;
-    vmess_streaming_reassembly_data_t* res_streaming_reassembly_data;
-} vmess_req_res_private_data_t;
 
 /* Debug relavant variables and routines */
 /* From packet-ssh.c, packet-tls.c and packet-tls-utils.c */

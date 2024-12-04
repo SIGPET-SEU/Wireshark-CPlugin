@@ -148,11 +148,6 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         return false; /* Decryption failed */
     }
 
-    ///* Convert the IV to char* type, which is required by vmess_kdf */
-    //GString* connectionNonce = g_malloc(req_iv->len + 1);
-    //memcpy(connectionNonce, req_iv->data, req_iv->len);
-    //connectionNonce[req_iv->len] = '\0';
-
     guchar* payloadHeaderLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
     /* payloadHeaderLengthAEADNonce should have the same liftspan as the decoder.
      * See https://docs.gtk.org/glib/type_func.ByteArray.append.html
@@ -190,19 +185,14 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         vmess_debug_printf("Decryption failed: %s.\n", gcry_strsource(err));
         return false; /* Decryption failed */
     }
-    //tvbuff_t* length_tvb = tvb_new_child_real_data(tvb, AEADPayloadLengthSerializedByte, aeadPayloadLengthSize, aeadPayloadLengthSize);
-    //guint16 aeadPayloadLength = tvb_get_guint16(length_tvb, 0, ENC_BIG_ENDIAN);
     /* DO NOT free the payloadHeaderLengthAEADNonce. */
     g_free(payloadHeaderLengthAEADKey);
 
     /* Get the length of header. */
     guint aeadPayloadLength = (guint)AEADPayloadLengthSerializedByte[0] << 8 | (guint)AEADPayloadLengthSerializedByte[1];
 
-    /**
-     * TODO: Save the decrypted data into some structure for later use.
-     * Decryption happens on the first pass, while proto_tree display
-     * happens on the second pass.
-     */
+    /* TODO: Header decryption. */
+
 
     /* It seems that key=0 in p_add_proto_data is enough for VMess */
     vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
@@ -224,18 +214,6 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     while (*pmessages) /* Iterate to the tail */
         pmessages = &(*pmessages)->next;
     *pmessages = message; /* Append to the tail */
-
-    
-    /* Add the decrypted length buffer to the tree */
-
-
-    
-
-    //proto_tree_add_uint(tree, hf_vmess_request_length, length_tvb, 0, aeadPayloadLengthSize, aeadPayloadLength);
-    /* TODO: Header decryption. */
-    /* Get the length of header. */
-    //guint aeadPayloadLength = (guint)AEADPayloadLengthSerializedByte[0] << 8 | (guint)AEADPayloadLengthSerializedByte[1];
-    //proto_tree_add_item(tree, hf_vmess_request_length, tvb, 0, 16, ENC_BIG_ENDIAN);
 
     return true;
 }
@@ -262,7 +240,6 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
         conv_data->req_decrypted = TRUE;
     }
 
-    /* TODO: vmess_get_message */
     vmess_message_info_t* msg = get_vmess_message(pinfo, 0);
     if (!msg)
         return 0;

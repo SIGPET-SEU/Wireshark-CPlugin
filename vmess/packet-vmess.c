@@ -247,7 +247,7 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     proto_tree* vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_request_auth, tvb, 0, 16, ENC_BIG_ENDIAN);
     /* Add the connectionNonce to the tree */
-    proto_tree_add_item(tree, hf_vmess_request_conn_nonce, tvb, 34, 8, ENC_BIG_ENDIAN);
+    proto_tree_add_item(vmess_tree, hf_vmess_request_conn_nonce, tvb, 34, 8, ENC_BIG_ENDIAN);
     conversation_t* conversation;
     vmess_conv_t* conv_data;
     /* get conversation, create if necessary*/
@@ -263,6 +263,11 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     }
 
     /* TODO: vmess_get_message */
+    vmess_message_info_t* msg = get_vmess_message(pinfo, 0);
+    if (!msg)
+        return 0;
+
+    proto_tree_add_uint(vmess_tree, hf_vmess_request_length, tvb, 0, 0, msg->data_len);
 
     return 0;
 }
@@ -1230,6 +1235,15 @@ proto_reg_handoff_vmess(void)
 
 vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id)
 {
+    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+    if (packet == NULL)
+        return NULL;
+
+    for (vmess_message_info_t* msg = packet->messages; msg; msg = msg->next) {
+        if (msg->id == record_id)
+            return msg;
+    }
+
     return NULL;
 }
 

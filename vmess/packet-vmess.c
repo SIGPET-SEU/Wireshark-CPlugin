@@ -148,6 +148,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         return false; /* Decryption failed */
     }
 
+    /************************ Header Length AEAD Decryption ************************/
     guchar* payloadHeaderLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
     /* payloadHeaderLengthAEADNonce should have the same liftspan as the decoder.
      * See https://docs.gtk.org/glib/type_func.ByteArray.append.html
@@ -182,17 +183,49 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
                                             aeadPayloadLengthSize,
                                             conv_data->auth->str, conv_data->auth->len);
     if (err != 0) {
-        vmess_debug_printf("Decryption failed: %s.\n", gcry_strsource(err));
+        vmess_debug_printf("VMess header length decryption failed: %s.\n", gcry_strsource(err));
         return false; /* Decryption failed */
     }
-    /* DO NOT free the payloadHeaderLengthAEADNonce. */
-    g_free(payloadHeaderLengthAEADKey);
-
     /* Get the length of header. */
     guint aeadPayloadLength = (guint)AEADPayloadLengthSerializedByte[0] << 8 | (guint)AEADPayloadLengthSerializedByte[1];
 
-    /* TODO: Header decryption. */
+    /* DO NOT free the payloadHeaderLengthAEADNonce. */
+    g_free(payloadHeaderLengthAEADKey);
+    g_free(AEADPayloadLengthSerializedByte);
 
+
+    /************************ Header Payload AEAD Decryption ************************/
+    guchar* payloadHeaderAEADKey = g_malloc(AES_128_KEY_SIZE);
+    guchar* payloadHeaderAEADNonce = wmem_alloc(wmem_file_scope(), GCM_IV_SIZE);
+    /* Initialize the request_len_decoder */
+    tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
+        kdfSaltConstVMessHeaderPayloadAEADKey,
+        conv_data->auth,
+        req_iv);
+    memcpy(payloadHeaderAEADKey, tmp_derived_key, AES_128_KEY_SIZE);
+    g_free(tmp_derived_key);
+
+    tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
+        kdfSaltConstVMessHeaderPayloadAEADIV,
+        conv_data->auth,
+        req_iv);
+    memcpy(payloadHeaderAEADNonce, tmp_derived_key, GCM_IV_SIZE);
+    g_free(tmp_derived_key);
+
+    guchar* aeadPayload = g_malloc(aeadPayloadLength);
+
+    conv_data->req_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
+        payloadHeaderAEADKey, payloadHeaderAEADNonce, 0);
+
+    err = vmess_byte_decryption(conv_data->req_decoder,
+        tvb_get_ptr(tvb, 42, aeadPayloadLength + 16),
+        aeadPayloadLength + 16,
+        aeadPayload, aeadPayloadLength,
+        conv_data->auth->str, conv_data->auth->len);
+    if (err != 0) {
+        vmess_debug_printf("VMess header payload decryption failed: %s.\n", gcry_strsource(err));
+        return false; /* Decryption failed */
+    }
 
     /* It seems that key=0 in p_add_proto_data is enough for VMess */
     vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
@@ -209,6 +242,8 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     message->type = VMESS_REQUEST;
     message->data_len = aeadPayloadLength;
     message->id = 0; /* Should be record_id, set to 0 for testing purpose */
+    message->plain_data = wmem_memdup(wmem_file_scope(), aeadPayload, aeadPayloadLength);
+    message->next = NULL;
 
     vmess_message_info_t** pmessages = &packet->messages;
     while (*pmessages) /* Iterate to the tail */

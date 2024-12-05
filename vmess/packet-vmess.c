@@ -318,6 +318,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
 
 int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     col_set_str(pinfo->cinfo, COL_INFO, "VMESS Request");
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
     proto_item* ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     proto_tree* vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_request_auth, tvb, 0, 16, ENC_BIG_ENDIAN);
@@ -404,6 +405,7 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
     col_set_str(pinfo->cinfo, COL_INFO, "VMESS Response");
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
     ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_response_header, tvb, 0, 38, ENC_BIG_ENDIAN);
@@ -443,6 +445,7 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
     col_set_str(pinfo->cinfo, COL_INFO, "VMESS Data");
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
     ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_payload_length, tvb, 0, 2, ENC_BIG_ENDIAN);

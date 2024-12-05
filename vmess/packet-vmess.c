@@ -77,11 +77,6 @@ static int hf_vmess_payload_length;
  * X stands for reserved bit
  * 
  */
-static int hf_vmess_request_opt;
-static int hf_vmess_request_opt_res;/* Reserved */
-static int hf_vmess_request_opt_M;  /* Meta info obfuscation */
-static int hf_vmess_request_opt_R;  /* Reuse TCP connection, deprecated since XRay Ver. 2.23+ */
-static int hf_vmess_request_opt_S;  /* Standard stream format */
 
 /* Option masks */
 #define OPT_S       0x01
@@ -89,6 +84,47 @@ static int hf_vmess_request_opt_S;  /* Standard stream format */
 #define OPT_M       0x04
 #define OPT_RES     0xF8
 #define OPT_MASK    0xFF
+
+static int hf_vmess_request_opt;
+static int hf_vmess_request_opt_res;/* Reserved */
+static int hf_vmess_request_opt_M;  /* Meta info obfuscation */
+static int hf_vmess_request_opt_R;  /* Reuse TCP connection, deprecated since XRay Ver. 2.23+ */
+static int hf_vmess_request_opt_S;  /* Standard stream format */
+
+/**
+ * The VMess spec for encryption method seems to differ from the Clash and X2Ray implementations.
+ */
+static const value_string encryption_method[] = {
+        { 0x03, "AES-128-GCM" },
+        { 0x04, "ChaCha20-Poly1305" },
+        { 0x05, "None" },
+        { 0, NULL },
+};
+
+#define PADDING_MASK    0xF0
+#define ENC_METHOD_MASK 0x0F
+
+static int hf_vmess_request_P;          /* Random padding*/
+static int hf_vmess_request_enc;        /* Encryption method */
+
+static const value_string request_cmd[] = {
+        { 0x01, "TCP" },
+        { 0x02, "UDP" },
+        { 0, NULL },
+};
+
+static int hf_vmess_request_cmd;        /* TCP/UDP */
+static int hf_vmess_request_port;       /* Port */
+
+static const value_string request_addr_type[] = {
+        { 0x01, "IPv4" },
+        { 0x02, "Domain" },
+        { 0x03, "IPv6" },
+        { 0, NULL },
+};
+
+static int hf_vmess_request_addr_type;       /* Address type */
+static int hf_vmess_request_addr;       /* Address */
 
 // heads for displaying reassembly information
 static int hf_msg_fragments;
@@ -329,17 +365,18 @@ int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tre
     proto_tree_add_boolean(opt_tree, hf_vmess_request_opt_M, packet_tvb, 34, 1, (gboolean)(opt & OPT_M));
     proto_tree_add_boolean(opt_tree, hf_vmess_request_opt_R, packet_tvb, 34, 1, (gboolean)(opt & OPT_R));
     proto_tree_add_boolean(opt_tree, hf_vmess_request_opt_S, packet_tvb, 34, 1, (gboolean)(opt & OPT_S));
-    /* Dissect P */
 
-    /* Dissect encryption method in human-friendly text */
+    proto_tree_add_uint(tree, hf_vmess_request_P, packet_tvb, 35, 1, (guint8)((plaintext[35] & PADDING_MASK) >> 4));
+    proto_tree_add_uint(tree, hf_vmess_request_enc, packet_tvb, 35, 1, (guint8)(plaintext[35] & ENC_METHOD_MASK));
 
-    /* Dissect CMD */
 
-    /* Dissect Port */
+    proto_tree_add_uint(tree, hf_vmess_request_cmd, packet_tvb, 37, 1, plaintext[37]);
+    guint16 port = plaintext[38] << 8 | plaintext[39];
+    proto_tree_add_uint(tree, hf_vmess_request_port, packet_tvb, 38, 2, port);
 
-    /* Dissect T */
-
-    /* Dissect A */
+    proto_tree_add_uint(tree, hf_vmess_request_addr_type, packet_tvb, 40, 1, plaintext[40]);
+    guint N = plaintext_len - 4 - (guint)((plaintext[35] & PADDING_MASK) >> 4) - 41; /* Compute the length of addr */
+    proto_tree_add_item(tree, hf_vmess_request_addr, packet_tvb, 41, N, ENC_ASCII);
 
     /* TODO: Check F and log possible warnings */
 
@@ -1227,6 +1264,43 @@ proto_register_vmess(void)
             {"Standard Form", "vmess.request.opt.s",
             FT_BOOLEAN, 8,
             TFS(&tfs_set_notset_vmess), OPT_S,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_P,
+            {"Random Padding Length", "vmess.request.padding",
+            FT_UINT8, BASE_DEC,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_enc,
+            {"Encryption Method", "vmess.request.enc_method",
+            FT_UINT8, BASE_HEX,
+            VALS(encryption_method), 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_cmd,
+            {"Command", "vmess.request.cmd",
+            FT_UINT8, BASE_HEX,
+            VALS(request_cmd), 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_port,
+            {"Port", "vmess.request.port",
+            FT_UINT16, BASE_DEC,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_addr_type,
+            {"Address Type", "vmess.request.addr_type",
+            FT_UINT16, BASE_HEX,
+            VALS(request_addr_type), 0x0,
+            NULL, HFILL }
+        },
+        /* TODO: Convert the base to human-friendly string */
+        { &hf_vmess_request_addr,
+            {"Address", "vmess.request.addr",
+            FT_STRING, BASE_NONE,
+            NULL, 0x0,
             NULL, HFILL }
         },
         { &hf_vmess_response_header,

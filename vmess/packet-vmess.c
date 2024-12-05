@@ -29,6 +29,7 @@
 #include <wsutil/file_util.h>
 #include <wsutil/wslog.h>
 #include <string.h>
+#include <epan/tfs.h>
 #include "packet-vmess.h"
 
 /*
@@ -65,6 +66,30 @@ static int hf_vmess_request_conn_nonce;
 static int hf_vmess_response_header;
 static int hf_vmess_payload_length;
 
+/**
+ * MSB          ---->            LSB
+ * ---------------------------------
+ * |        Options(8 bits)        |
+ * ---------------------------------
+ * | X | X | X | X | X | M | R | S | 
+ * ---------------------------------
+ * 
+ * X stands for reserved bit
+ * 
+ */
+static int hf_vmess_request_opt;
+static int hf_vmess_request_opt_res;/* Reserved */
+static int hf_vmess_request_opt_M;  /* Meta info obfuscation */
+static int hf_vmess_request_opt_R;  /* Reuse TCP connection, deprecated since XRay Ver. 2.23+ */
+static int hf_vmess_request_opt_S;  /* Standard stream format */
+
+/* Option masks */
+#define OPT_S       0x01
+#define OPT_R       0x02
+#define OPT_M       0x04
+#define OPT_RES     0xF8
+#define OPT_MASK    0xFF
+
 // heads for displaying reassembly information
 static int hf_msg_fragments;
 static int hf_msg_fragment;
@@ -85,6 +110,7 @@ static int ett_vmess;
 
 static gint ett_msg_fragment;
 static gint ett_msg_fragments;
+static gint ett_vmess_opt;
 
 /************VMess ETT Fileds End**************/
 
@@ -187,7 +213,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         return false; /* Decryption failed */
     }
     /* Get the length of header. */
-    guint aeadPayloadLength = (guint)AEADPayloadLengthSerializedByte[0] << 8 | (guint)AEADPayloadLengthSerializedByte[1];
+    guint16 aeadPayloadLength = (guint16)AEADPayloadLengthSerializedByte[0] << 8 | (guint16)AEADPayloadLengthSerializedByte[1];
 
     /* DO NOT free the payloadHeaderLengthAEADNonce. */
     g_free(payloadHeaderLengthAEADKey);
@@ -280,6 +306,42 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
         return 0;
 
     proto_tree_add_uint(vmess_tree, hf_vmess_request_length, tvb, 0, 0, msg->data_len);
+    dissect_decrypted_vmess_request(tvb, pinfo, vmess_tree, msg);
+
+    return 0;
+}
+
+int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, vmess_message_info_t* msg)
+{
+    guchar* plaintext = msg->plain_data;
+    guint plaintext_len = msg->data_len;
+    proto_item* opt_ti;
+    proto_tree* opt_tree;
+
+    tvbuff_t* packet_tvb = tvb_new_child_real_data(tvb, plaintext, plaintext_len, plaintext_len);
+    add_new_data_source(pinfo, packet_tvb, "Decrypted VMess");
+
+    /* Dissect Opt as a subtree and add human-friendly info */
+    guint8 opt = (guint8)plaintext[34];
+    opt_ti = proto_tree_add_uint(tree, hf_vmess_request_opt, packet_tvb, 34, 1, opt);
+    opt_tree = proto_item_add_subtree(opt_ti, ett_vmess_opt);
+    proto_tree_add_boolean(opt_tree, hf_vmess_request_opt_res, packet_tvb, 34, 1, (gboolean)(opt & OPT_RES));
+    proto_tree_add_boolean(opt_tree, hf_vmess_request_opt_M, packet_tvb, 34, 1, (gboolean)(opt & OPT_M));
+    proto_tree_add_boolean(opt_tree, hf_vmess_request_opt_R, packet_tvb, 34, 1, (gboolean)(opt & OPT_R));
+    proto_tree_add_boolean(opt_tree, hf_vmess_request_opt_S, packet_tvb, 34, 1, (gboolean)(opt & OPT_S));
+    /* Dissect P */
+
+    /* Dissect encryption method in human-friendly text */
+
+    /* Dissect CMD */
+
+    /* Dissect Port */
+
+    /* Dissect T */
+
+    /* Dissect A */
+
+    /* TODO: Check F and log possible warnings */
 
     return 0;
 }
@@ -1120,21 +1182,51 @@ proto_register_vmess(void)
 
     static hf_register_info hf[] = {
         { &hf_vmess_request_auth,
-            {"VMess Request Auth", "vmess.request.auth",
+            {"Auth", "vmess.request.auth",
             FT_BYTES, BASE_NONE,
             NULL, 0x0,
             NULL, HFILL }
         },
         { &hf_vmess_request_conn_nonce,
-            {"VMess Request Connection Nonce", "vmess.request.conn_nonce",
+            {"Connection Nonce", "vmess.request.conn_nonce",
             FT_BYTES, BASE_NONE,
             NULL, 0x0,
             NULL, HFILL }
         },
         { &hf_vmess_request_length,
-            {"VMess Request Length", "vmess.request.length",
+            {"Request Length", "vmess.request.length",
             FT_UINT16, BASE_DEC,
             NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_opt,
+            {"Options", "vmess.request.opt",
+            FT_UINT8, BASE_HEX,
+            NULL, OPT_MASK,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_opt_res,
+            {"Reserved", "vmess.request.opt.res",
+            FT_BOOLEAN, 8,
+            TFS(&tfs_set_notset_vmess), OPT_RES,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_opt_M,
+            {"Meta Obfuscate", "vmess.request.opt.m",
+            FT_BOOLEAN, 8,
+            TFS(&tfs_set_notset_vmess), OPT_M,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_opt_R,
+            {"Reuse", "vmess.request.opt.r",
+            FT_BOOLEAN, 8,
+            TFS(&tfs_set_notset_vmess), OPT_R,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_opt_S,
+            {"Standard Form", "vmess.request.opt.s",
+            FT_BOOLEAN, 8,
+            TFS(&tfs_set_notset_vmess), OPT_S,
             NULL, HFILL }
         },
         { &hf_vmess_response_header,
@@ -1191,7 +1283,8 @@ proto_register_vmess(void)
     static int* ett[] = {
         &ett_vmess,
         &ett_msg_fragment,
-        &ett_msg_fragments
+        &ett_msg_fragments,
+        &ett_vmess_opt
     };
 
     proto_vmess = proto_register_protocol(

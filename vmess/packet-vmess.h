@@ -17,6 +17,9 @@
 #include <gcrypt.h>
 #include <stdarg.h> /* For variable number of args in VMess KDF */
 
+/* This should be put in tfs.h, but the compiler complains that initializer is not a constant */
+const true_false_string tfs_set_notset_vmess = { "Set", "Not set" };
+
 #define TLS_SIGNUM (gint)5 /* The number of TLS record types. */
 
 #define VMESS_PROTO_DATA_REQRES	0
@@ -294,6 +297,9 @@ typedef struct {
  * Fetch the VMess message from the packet attached to pinfo.
  */
 vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id);
+
+int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
+    vmess_message_info_t* msg);
 
 /**
  * Encapsulate the conv_data fetching process:

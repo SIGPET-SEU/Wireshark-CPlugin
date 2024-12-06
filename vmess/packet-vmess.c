@@ -429,6 +429,25 @@ guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
     return tvb_get_ntohs(tvb, offset) + 2;
 }
 
+/**
+ * Decrypt the data packets. According to the Clash implementation, the AEAD encryption maintains the counter
+ * to generate the AEAD nonce. Therefore, we have to add the from_server, count_server, and count_client fields
+ * to enable AEAD decryption.
+ * 
+ * TODO: Calculate the from_server
+ * 
+ * \param tvb
+ * \param pinfo
+ * \param tree
+ * \param offset
+ * \param conv_data
+ * \return 
+ */
+static gboolean
+decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
+
+}
+
 int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     proto_tree* vmess_tree;
     proto_item* ti;
@@ -449,8 +468,11 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_payload_length, tvb, 0, 2, ENC_BIG_ENDIAN);
+    /* TODO: Perform decryption on the tvb */
+    guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
 
-    next_tvb = tvb_new_subset_remaining(tvb, 2);
+    /* TODO: The next_tvb should be the decrypted one */
+    next_tvb = tvb_new_subset_length(tvb, 2, payload_length);
 
     if (next_tvb) {
         reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
@@ -1444,6 +1466,8 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess
     conv_data->resp_decrypted = FALSE;
     conv_data->auth = NULL;
     conv_data->reassembly_info = streaming_reassembly_info_new();
+    conv_data->count_reader = 0;
+    conv_data->count_writer = 0;
 
     /* Add the conv_data to the conversation in this routine. */
     conversation_add_proto_data(conversation, proto_vmess, conv_data);

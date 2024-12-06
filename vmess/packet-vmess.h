@@ -265,6 +265,9 @@ typedef struct _vmess_conv_t {
     VMessDecoder* data_decoder;
     GString* auth;
 
+    guint16 count_writer;   /* The counter for AEAD client(writer) */
+    guint16 count_reader;   /* The counter for AEAD server(reader) */
+
     /* Fields related to proxied/tunneled/Upgraded connections. */
     guint32	 startframe;	/* First frame of proxied connection */
     int    	 startoffset;	/* Offset within the frame where the new protocol begins. */

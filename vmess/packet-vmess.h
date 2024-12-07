@@ -265,6 +265,9 @@ typedef struct _vmess_conv_t {
     VMessDecoder* data_decoder;
     GString* auth;
 
+    address srv_addr;
+    guint srv_port;
+
     guint16 count_writer;   /* The counter for AEAD client(writer) */
     guint16 count_reader;   /* The counter for AEAD server(reader) */
 

@@ -330,6 +330,8 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     conversation = find_or_create_conversation(pinfo);
     /* get associated state information, create if necessary */
     conv_data = get_vmess_conv(conversation, proto_vmess);
+    copy_address_wmem(wmem_file_scope(), &conv_data->srv_addr, &pinfo->dst);
+    conv_data->srv_port = pinfo->destport;
 
     /* If the header packet is decrypted, try to perform decryption */
     if (!conv_data->req_decrypted){
@@ -1468,6 +1470,7 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess
     conv_data->reassembly_info = streaming_reassembly_info_new();
     conv_data->count_reader = 0;
     conv_data->count_writer = 0;
+    /* Defer the port and address initialization to dissect VMess Request */
 
     /* Add the conv_data to the conversation in this routine. */
     conversation_add_proto_data(conversation, proto_vmess, conv_data);

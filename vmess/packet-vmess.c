@@ -445,25 +445,18 @@ vmess_packet_from_server(vmess_conv_t* conv_data, const packet_info* pinfo) {
  * to enable AEAD decryption.
  * 
  * TODO: Calculate the from_server
- * 
- * \param tvb
- * \param pinfo
- * \param tree
- * \param offset
- * \param conv_data
- * \return 
  */
 static gboolean
 decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
     GString* data_key = (GString*)g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
     if (data_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
-        return false; /* Decryption failed */
+        return FALSE; /* Decryption failed */
     }
     GString* data_iv = (GString*)g_hash_table_lookup(vmess_key_map.data_iv, conv_data->auth);
     if (data_iv == NULL) {
         vmess_debug_printf("VMess IV not found, impossible to decrypt.\n");
-        return false; /* Decryption failed */
+        return FALSE; /* Decryption failed */
     }
 
     gboolean is_from_server = vmess_packet_from_server(conv_data, pinfo);
@@ -500,6 +493,22 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         memcpy(iv[2], conv_data->srv_data_decoder->write_iv->str[2], 10); /* Awkward copy */
         vmess_decoder_reset_iv(conv_data->srv_data_decoder, iv, iv_len);
         g_free(iv);
+        /* TODO: Perform decryption */
+        guint16 data_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
+
+        guint16 plaintext_len = data_length - 16; /* ONLY works for AES-128-GCM */
+        guchar* plaintext = g_malloc(plaintext_len);
+        /* In data blocks, no AD is used. */
+        gcry_error_t err = vmess_byte_decryption(conv_data->srv_data_decoder,
+            tvb_get_ptr(tvb, 2, data_length),
+            data_length,
+            plaintext,
+            plaintext_len,
+            NULL, 0);
+        if (err != 0) {
+            vmess_debug_printf("VMess data from server decryption failed: %s.\n", gcry_strsource(err));
+            return false; /* Decryption failed */
+        }
         conv_data->count_reader++;
     }
     else {
@@ -517,6 +526,22 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         memcpy(iv[2], conv_data->cli_data_decoder->write_iv->str[2], 10); /* Awkward copy */
         vmess_decoder_reset_iv(conv_data->cli_data_decoder, iv, iv_len);
         g_free(iv);
+        /* TODO: Perform decryption */
+        guint16 data_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
+
+        guint16 plaintext_len = data_length - 16; /* ONLY works for AES-128-GCM */
+        guchar* plaintext = g_malloc(plaintext_len);
+        /* In data blocks, no AD is used. */
+        gcry_error_t err = vmess_byte_decryption(conv_data->cli_data_decoder,
+            tvb_get_ptr(tvb, 2, data_length),
+            data_length,
+            plaintext,
+            plaintext_len,
+            NULL, 0);
+        if (err != 0) {
+            vmess_debug_printf("VMess data from server decryption failed: %s.\n", gcry_strsource(err));
+            return false; /* Decryption failed */
+        }
         conv_data->count_writer++;
     }  
 

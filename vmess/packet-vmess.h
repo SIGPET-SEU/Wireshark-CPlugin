@@ -48,6 +48,13 @@ void vmess_free(gpointer data);
 
 
 /* VMess decryption structures and routines */
+/* Error handling for libgcrypt */ 
+#define GCRYPT_CHECK(gcry_error)                        \
+    if (gcry_error) {                                   \
+        fprintf(stderr, "Failure at line %d: %s\n",     \
+                __LINE__, gcry_strerror(gcry_error));   \
+        return gcry_error;                              \
+    }
 
 #define AES_128_KEY_SIZE 16
 
@@ -291,6 +298,15 @@ typedef struct _vmess_conv_t {
     guint16 count_writer;   /* The counter for AEAD client (writer) */
     guint16 count_reader;   /* The counter for AEAD server (reader) */
 
+    /*
+    * This variable is used to track if we could find the auth for the current conversation,
+    * which should be impossible if not found since encryption method is stored in the VMess Request packet.
+    * 
+    * Nevertheless, if securityNone is set, i.e., no data encryption is used, it should try 
+    * heuristic dissection. Currently, we just ignore the heuristic one.
+    */
+    gboolean auth_missing;
+
     /* Fields related to proxied/tunneled/Upgraded connections. */
     guint32	 startframe;	/* First frame of proxied connection */
     int    	 startoffset;	/* Offset within the frame where the new protocol begins. */
@@ -364,14 +380,6 @@ void vmess_set_debug(const gchar* name);
 
 void vmess_debug_printf(const gchar* fmt, ...);
 
-/* Error handling for libgcrypt */
-#define GCRYPT_CHECK(gcry_error)                                    \
-    if (gcry_error) {                                               \
-        vmess_debug_printf(stderr, "Failure at line %d: %s\n",      \
-                __LINE__, gcry_strerror(gcry_error));               \
-        return gcry_error;                                          \
-    }
-
 void vmess_prefs_apply_cb(void);
 
 void vmess_debug_flush(void);
@@ -384,13 +392,6 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 #define vmess_debug_flush()
 #define vmess_debug_print_hash_table(hash_table)
 #define vmess_debug_print_key_value(key, value, user_data)
-
-#define GCRYPT_CHECK(gcry_error)                                    \
-    if (gcry_error) {                                               \
-        fprintf(stderr, "Failure at line %d: %s\n",                 \
-                __LINE__, gcry_strerror(gcry_error));               \
-        return gcry_error;                                          \
-    }
 #endif /* VMESS_DECRYPT_DEBUG }}} */
 
 

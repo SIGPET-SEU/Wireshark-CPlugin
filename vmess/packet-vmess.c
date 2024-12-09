@@ -439,6 +439,18 @@ vmess_packet_from_server(vmess_conv_t* conv_data, const packet_info* pinfo) {
     return is_from_server;
 }
 
+gcry_error_t vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len)
+{
+    gcry_error_t err = 0;
+    err = gcry_cipher_reset(decoder->evp);
+    GCRYPT_CHECK(err)
+
+    err = gcry_cipher_setiv(decoder->evp, iv, iv_len);
+    GCRYPT_CHECK(err)
+
+    return err;
+}
+
 /**
  * Decrypt the data packets. According to the Clash implementation, the AEAD encryption maintains the counter
  * to generate the AEAD nonce. Therefore, we have to add the from_server, count_server, and count_client fields
@@ -471,8 +483,8 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
              * VMess spec: https://xtls.github.io/development/protocols/vmess.html
              */
             gcry_md_hd_t srv_data_key_hd, srv_data_iv_hd;
-            gcry_md_open(srv_data_key_hd, GCRY_MD_SHA256, 0);
-            gcry_md_open(srv_data_iv_hd, GCRY_MD_SHA256, 0);
+            gcry_md_open(&srv_data_key_hd, GCRY_MD_SHA256, 0);
+            gcry_md_open(&srv_data_iv_hd, GCRY_MD_SHA256, 0);
 
             gcry_md_write(srv_data_key_hd, data_key->str, data_key->len);
             gcry_md_write(srv_data_iv_hd, data_iv->str, data_iv->len);
@@ -490,7 +502,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         guint iv_len = 12;
         guchar* iv = g_malloc(iv_len);
         put_uint16_be(conv_data->count_reader, iv);
-        memcpy(iv[2], conv_data->srv_data_decoder->write_iv->str[2], 10); /* Awkward copy */
+        memcpy(&iv[2], &conv_data->srv_data_decoder->write_iv->str[2], 10); /* Awkward copy */
         vmess_decoder_reset_iv(conv_data->srv_data_decoder, iv, iv_len);
         g_free(iv);
         /* TODO: Perform decryption */
@@ -523,7 +535,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         guint iv_len = 12;
         guchar* iv = g_malloc(iv_len);
         put_uint16_be(conv_data->count_writer, iv);
-        memcpy(iv[2], conv_data->cli_data_decoder->write_iv->str[2], 10); /* Awkward copy */
+        memcpy(&iv[2], &conv_data->cli_data_decoder->write_iv->str[2], 10); /* Awkward copy */
         vmess_decoder_reset_iv(conv_data->cli_data_decoder, iv, iv_len);
         g_free(iv);
         /* TODO: Perform decryption */
@@ -571,15 +583,20 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     /* TODO: Perform decryption on the tvb */
     guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
 
-    /* TODO: The next_tvb should be the decrypted one */
-    next_tvb = tvb_new_subset_length(tvb, 2, payload_length);
-
-    if (next_tvb) {
-        reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
-            vmess_tree, tree, proto_vmess_streaming_reassembly_table,
-            conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
-            proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
+    gboolean success = decrypt_vmess_data(tvb, pinfo, tree, 0, conv_data);
+    if (!success) {
+        vmess_debug_printf("VMess data decryption failed, higher level dissection is impossible.\n");
     }
+
+    /* TODO: The next_tvb should be the decrypted one */
+    //next_tvb = tvb_new_subset_length(tvb, 2, payload_length);
+
+    //if (next_tvb) {
+    //    reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
+    //        vmess_tree, tree, proto_vmess_streaming_reassembly_table,
+    //        conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
+    //        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
+    //}
 
     return 0;
 }
@@ -601,6 +618,13 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 
     bool is_request = false;
 
+    if (conv_data->auth_missing) {
+        vmess_debug_printf("No auth for this VMess conversation, further dissection impossible. Frame: %d.\n",
+            pinfo->fd->num);
+        /* It should really be a heuristic dissection trial. */
+        return tvb_captured_length(tvb);
+    }
+
     /* The request could be dissected only once, since it occupies exactly one packet. */
     if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth_raw_data = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
@@ -617,8 +641,24 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 conv_data->auth = g_string_append_len(conv_data->auth, tmp_auth->str, tmp_auth->len);
             }
             is_request = true;
+            g_string_free(tmp_auth, true);
         }
-        g_string_free(tmp_auth, true);
+        else {
+            /*
+             * Once data/response decryption routines are introduced, failure on finding auth makes it
+             * impossible for later decryption for current conversation. Even when security level is 
+             * set to securityNone, we now simply view it as an impossible decryption task.
+             * 
+             * However, when securityNone is used, the right approach is to use heuristic dissector to 
+             * dissect later VMess data/response packets. This idea would be implemented in the future.
+             */
+            conv_data->auth_missing = TRUE;
+            g_string_free(tmp_auth, true);
+            vmess_debug_printf("Unable to find auth for this VMess conversation, further dissection impossible. Frame: %d.\n",
+                pinfo->fd->num);
+            return tvb_captured_length(tvb);
+
+        }
     }
 
     if (is_request) {
@@ -883,16 +923,6 @@ vmess_decoder_new(int algo, int mode, guchar* key, guchar* iv, guint flags) {
     decoder->write_iv = wmem_new0(wmem_file_scope(), GString);
     decoder->write_iv = g_string_append_len(decoder->write_iv, iv, iv_len);
     return decoder;
-}
-
-gcry_error_t vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len)
-{
-    gcry_error_t err = 0;
-    err = gcry_cipher_reset(decoder->evp);
-    GCRYPT_CHECK(err)
-
-    err = gcry_cipher_setiv(decoder->evp, iv, iv_len);
-    GCRYPT_CHECK(err)
 }
 
 gcry_error_t
@@ -1580,6 +1610,7 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess
     conv_data->cli_data_decoder = NULL;
     conv_data->count_reader = 0;
     conv_data->count_writer = 0;
+    conv_data->auth_missing = FALSE;
     /* Defer the port and address initialization to dissect VMess Request */
 
     /* Add the conv_data to the conversation in this routine. */

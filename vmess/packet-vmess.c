@@ -471,8 +471,27 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         /* Initialize srv_decoder */
         /* NOTE: data_iv->str is 16 bytes long, and AES-128-GCM only uses the first 12 bytes of it. */
         if (!conv_data->srv_data_decoder) {
+            /**
+             * NOTE: According to the Clash implementation, the server side key and iv are actually the 
+             * SHA256-hashed version of those used in the client side. This seems to violate the VMess
+             * protocol spec, but we still follow the Clash implementation in current dissection.
+             * VMess spec: https://xtls.github.io/development/protocols/vmess.html
+             */
+            gcry_md_hd_t srv_data_key_hd, srv_data_iv_hd;
+            gcry_md_open(srv_data_key_hd, GCRY_MD_SHA256, 0);
+            gcry_md_open(srv_data_iv_hd, GCRY_MD_SHA256, 0);
+
+            gcry_md_write(srv_data_key_hd, data_key->str, data_key->len);
+            gcry_md_write(srv_data_iv_hd, data_iv->str, data_iv->len);
+
+            guchar* srv_data_key = gcry_md_read(srv_data_key_hd, GCRY_MD_SHA256);
+            guchar* srv_data_iv = gcry_md_read(srv_data_iv_hd, GCRY_MD_SHA256);
+
+
             conv_data->srv_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
-                                        data_key->str, data_iv->str, 0);
+                                            srv_data_key, srv_data_iv, 0);
+            gcry_md_close(srv_data_key_hd);
+            gcry_md_close(srv_data_iv_hd);
         }
         /* IV is set to count (2 byte) || data_iv->str (3~12 byte) */
         guint iv_len = 12;

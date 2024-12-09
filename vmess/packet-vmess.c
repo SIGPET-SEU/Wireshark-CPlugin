@@ -487,6 +487,18 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         /* Initialize cli_decoder */
         conv_data->cli_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
                                         data_key->str, data_iv->str, 0);
+        if (!conv_data->cli_data_decoder) {
+            conv_data->cli_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
+                data_key->str, data_iv->str, 0);
+        }
+        /* IV is set to count (2 byte) || data_iv->str (3~12 byte) */
+        guint iv_len = 12;
+        guchar* iv = g_malloc(iv_len);
+        put_uint16_be(conv_data->count_writer, iv);
+        memcpy(iv[2], conv_data->cli_data_decoder->write_iv->str[2], 10); /* Awkward copy */
+        vmess_decoder_reset_iv(conv_data->cli_data_decoder, iv, iv_len);
+        g_free(iv);
+        conv_data->count_writer++;
     }  
 
     return TRUE;

@@ -431,6 +431,14 @@ guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
     return tvb_get_ntohs(tvb, offset) + 2;
 }
 
+static gboolean
+vmess_packet_from_server(vmess_conv_t* conv_data, const packet_info* pinfo) {
+    gboolean is_from_server;
+    is_from_server = conv_data->srv_port == pinfo->srcport &&
+        addresses_equal(&conv_data->srv_addr, &pinfo->src);
+    return is_from_server;
+}
+
 /**
  * Decrypt the data packets. According to the Clash implementation, the AEAD encryption maintains the counter
  * to generate the AEAD nonce. Therefore, we have to add the from_server, count_server, and count_client fields
@@ -447,7 +455,41 @@ guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
  */
 static gboolean
 decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
+    GString* data_key = (GString*)g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
+    if (data_key == NULL) {
+        vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
+        return false; /* Decryption failed */
+    }
+    GString* data_iv = (GString*)g_hash_table_lookup(vmess_key_map.data_iv, conv_data->auth);
+    if (data_iv == NULL) {
+        vmess_debug_printf("VMess IV not found, impossible to decrypt.\n");
+        return false; /* Decryption failed */
+    }
 
+    gboolean is_from_server = vmess_packet_from_server(conv_data, pinfo);
+    if (is_from_server) {
+        /* Initialize srv_decoder */
+        /* NOTE: data_iv->str is 16 bytes long, and AES-128-GCM only uses the first 12 bytes of it. */
+        if (!conv_data->srv_data_decoder) {
+            conv_data->srv_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
+                                        data_key->str, data_iv->str, 0);
+        }
+        /* IV is set to count (2 byte) || data_iv->str (3~12 byte) */
+        guint iv_len = 12;
+        guchar* iv = g_malloc(iv_len);
+        put_uint16_be(conv_data->count_reader, iv);
+        memcpy(iv[2], conv_data->srv_data_decoder->write_iv->str[2], 10); /* Awkward copy */
+        vmess_decoder_reset_iv(conv_data->srv_data_decoder, iv, iv_len);
+        g_free(iv);
+        conv_data->count_reader++;
+    }
+    else {
+        /* Initialize cli_decoder */
+        conv_data->cli_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
+                                        data_key->str, data_iv->str, 0);
+    }  
+
+    return TRUE;
 }
 
 int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
@@ -785,6 +827,16 @@ vmess_decoder_new(int algo, int mode, guchar* key, guchar* iv, guint flags) {
     decoder->write_iv = wmem_new0(wmem_file_scope(), GString);
     decoder->write_iv = g_string_append_len(decoder->write_iv, iv, iv_len);
     return decoder;
+}
+
+gcry_error_t vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len)
+{
+    gcry_error_t err = 0;
+    err = gcry_cipher_reset(decoder->evp);
+    GCRYPT_CHECK(err)
+
+    err = gcry_cipher_setiv(decoder->evp, iv, iv_len);
+    GCRYPT_CHECK(err)
 }
 
 gcry_error_t
@@ -1468,6 +1520,8 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess
     conv_data->resp_decrypted = FALSE;
     conv_data->auth = NULL;
     conv_data->reassembly_info = streaming_reassembly_info_new();
+    conv_data->srv_data_decoder = NULL;
+    conv_data->cli_data_decoder = NULL;
     conv_data->count_reader = 0;
     conv_data->count_writer = 0;
     /* Defer the port and address initialization to dissect VMess Request */
@@ -1475,6 +1529,18 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess
     /* Add the conv_data to the conversation in this routine. */
     conversation_add_proto_data(conversation, proto_vmess, conv_data);
     return conv_data;
+}
+
+void
+put_uint16_be(uint16_t value, unsigned char* buffer) {
+    buffer[0] = (value >> 8) & 0xFF;  // Most significant byte
+    buffer[1] = value & 0xFF;         // Least significant byte
+}
+
+void
+put_uint16_le(uint16_t value, unsigned char* buffer) {
+    buffer[0] = value & 0xFF;         // Least significant byte
+    buffer[1] = (value >> 8) & 0xFF;  // Most significant byte
 }
 
 bool

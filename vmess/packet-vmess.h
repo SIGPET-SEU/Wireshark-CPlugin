@@ -48,13 +48,6 @@ void vmess_free(gpointer data);
 
 
 /* VMess decryption structures and routines */
-/* Error handling for libgcrypt */ 
-#define GCRYPT_CHECK(gcry_error)                        \
-    if (gcry_error) {                                   \
-        fprintf(stderr, "Failure at line %d: %s\n",     \
-                __LINE__, gcry_strerror(gcry_error));   \
-        return gcry_error;                              \
-    }
 
 #define AES_128_KEY_SIZE 16
 
@@ -218,6 +211,21 @@ gboolean vmess_decrypt_init(void);
 VMessDecoder*
 vmess_decoder_new(int algo, int mode, guchar* key, guchar* iv, guint flags);
 
+/**
+ * Reset decoder with a new IV, used for VMess data frame transmission.
+ * 
+ * NOTE: A decoder consists of IV, cipher_suite and CTX, this routine only reset the CTX. IV is NOT reset since
+ * VMess data IVs are inferred from the initial IV. We want to keep track of it for convenience. cipher_suite is
+ * NOT changed, either.
+ * 
+ * @param decoder       The VMess decoder with key set
+ * @param iv            The new IV for reset, the caller is responsible to allocate a proper length for the IV.
+ * 
+ * @return gcry_error_t 0 on success, failure otherwise.
+ */
+gcry_error_t
+vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len);
+
 /*
  * Cipher initialization routine.
  *
@@ -262,14 +270,26 @@ typedef struct _vmess_conv_t {
     //vmess_decrypt_info_t* vmess_decrypt_info;
     VMessDecoder* req_length_decoder;
     VMessDecoder* req_decoder;
-    VMessDecoder* data_decoder;
+    /*
+    * The data decoders heavily depend on the implementation of VMess.
+    * Clash seems to violate the spec of VMess. Its resp data key and IV
+    * are drawn from req data key and IV using SHA256 when AEAD is adopted.
+    * 
+    * That is, resp key = SHA256(req key)[0:16], resp IV = SHA256(req IV)[0:16],
+    * while XRay implementation seems to set resp key = req key, resp IV = req IV.
+    * 
+    * Since our prototype is based on Clash, the Clash implementation is used to 
+    * infer crypto info.
+    */
+    VMessDecoder* srv_data_decoder;
+    VMessDecoder* cli_data_decoder;
     GString* auth;
 
     address srv_addr;
     guint srv_port;
 
-    guint16 count_writer;   /* The counter for AEAD client(writer) */
-    guint16 count_reader;   /* The counter for AEAD server(reader) */
+    guint16 count_writer;   /* The counter for AEAD client (writer) */
+    guint16 count_reader;   /* The counter for AEAD server (reader) */
 
     /* Fields related to proxied/tunneled/Upgraded connections. */
     guint32	 startframe;	/* First frame of proxied connection */
@@ -344,6 +364,14 @@ void vmess_set_debug(const gchar* name);
 
 void vmess_debug_printf(const gchar* fmt, ...);
 
+/* Error handling for libgcrypt */
+#define GCRYPT_CHECK(gcry_error)                                    \
+    if (gcry_error) {                                               \
+        vmess_debug_printf(stderr, "Failure at line %d: %s\n",      \
+                __LINE__, gcry_strerror(gcry_error));               \
+        return gcry_error;                                          \
+    }
+
 void vmess_prefs_apply_cb(void);
 
 void vmess_debug_flush(void);
@@ -356,10 +384,29 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 #define vmess_debug_flush()
 #define vmess_debug_print_hash_table(hash_table)
 #define vmess_debug_print_key_value(key, value, user_data)
+
+#define GCRYPT_CHECK(gcry_error)                                    \
+    if (gcry_error) {                                               \
+        fprintf(stderr, "Failure at line %d: %s\n",                 \
+                __LINE__, gcry_strerror(gcry_error));               \
+        return gcry_error;                                          \
+    }
 #endif /* VMESS_DECRYPT_DEBUG }}} */
 
 
 /* Some util functions */
+/*
+ * Convert a uint16 number into its byte-wise representation in Big Endian manner
+ */
+void
+put_uint16_be(uint16_t value, unsigned char* buffer);
+
+/*
+ * Convert a uint16 number into its byte-wise representation in Little Endian manner
+ */
+void
+put_uint16_le(uint16_t value, unsigned char* buffer);
+
 bool gbytearray_eq(const GByteArray*, const GByteArray*);
 
 bool char_array_eq(const char*, const char*, size_t);

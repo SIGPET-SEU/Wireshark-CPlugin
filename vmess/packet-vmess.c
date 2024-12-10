@@ -212,7 +212,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
 
     /************************ Header Length AEAD Decryption ************************/
     guchar* payloadHeaderLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
-    /* payloadHeaderLengthAEADNonce should have the same liftspan as the decoder.
+    /* respLengthAEADNonce should have the same liftspan as the decoder.
      * See https://docs.gtk.org/glib/type_func.ByteArray.append.html
      */
     guchar* payloadHeaderLengthAEADNonce = wmem_alloc(wmem_file_scope(), GCM_IV_SIZE);
@@ -251,7 +251,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     /* Get the length of header. */
     guint16 aeadPayloadLength = (guint16)AEADPayloadLengthSerializedByte[0] << 8 | (guint16)AEADPayloadLengthSerializedByte[1];
 
-    /* DO NOT free the payloadHeaderLengthAEADNonce. */
+    /* DO NOT free the respLengthAEADNonce. */
     g_free(payloadHeaderLengthAEADKey);
     g_free(AEADPayloadLengthSerializedByte);
 
@@ -391,6 +391,77 @@ guint get_dissect_vmess_response_len(packet_info* pinfo _U_, tvbuff_t* tvb,
     return tvb_get_ntohs(tvb, offset + 38) + 40;
 }
 
+static gboolean
+decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
+    GString* data_key = (GString*)g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
+    if (data_key == NULL) {
+        vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
+        return false; /* Decryption failed */
+    }
+    GString* data_iv = (GString*)g_hash_table_lookup(vmess_key_map.data_iv, conv_data->auth);
+    if (data_iv == NULL) {
+        vmess_debug_printf("VMess IV not found, impossible to decrypt.\n");
+        return false; /* Decryption failed */
+    }
+
+    /****************** Response Key Derive ***********************/
+    gcry_md_hd_t data_key_hd, data_iv_hd;
+    gcry_md_open(&data_key_hd, GCRY_MD_SHA256, 0);
+    gcry_md_open(&data_iv_hd, GCRY_MD_SHA256, 0);
+
+    gcry_md_write(data_key_hd, data_key->str, data_key->len);
+    gcry_md_write(data_iv_hd, data_iv->str, data_iv->len);
+
+    guchar* resp_key_data = gcry_md_read(data_key_hd, GCRY_MD_SHA256);
+    guchar* resp_iv_data = gcry_md_read(data_iv_hd, GCRY_MD_SHA256);
+    
+    GString* resp_key = g_string_new_len(resp_key_data, AES_128_KEY_SIZE);
+    GString* resp_iv = g_string_new_len(resp_iv_data, AES_128_KEY_SIZE);
+
+    gcry_md_close(data_key_hd);
+    gcry_md_close(data_iv_hd);
+    /************************ Header Length AEAD Decryption ************************/
+    guchar* respLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
+    /* respLengthAEADNonce should have the same liftspan as the decoder.
+     * See https://docs.gtk.org/glib/type_func.ByteArray.append.html
+     */
+    guchar* respLengthAEADNonce = wmem_alloc(wmem_file_scope(), GCM_IV_SIZE);
+    guchar* tmp_derived_key;
+
+    /* Initialize the request_len_decoder */
+    tmp_derived_key = vmess_kdf(resp_key->str, resp_key->len, 1, kdfSaltConstAEADRespHeaderLenKey);
+    memcpy(respLengthAEADKey, tmp_derived_key, AES_128_KEY_SIZE);
+    g_free(tmp_derived_key);
+
+    tmp_derived_key = vmess_kdf(resp_iv->str, resp_iv->len, 1, kdfSaltConstAEADRespHeaderLenIV);
+    memcpy(respLengthAEADNonce, tmp_derived_key, GCM_IV_SIZE);
+    g_free(tmp_derived_key);
+
+    conv_data->resp_length_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
+        respLengthAEADKey, respLengthAEADNonce, 0);
+    guint aeadRespLengthSize = 2;
+    guchar* AEADRespLengthSerializedByte = g_malloc(aeadRespLengthSize);
+
+    gcry_error_t err = vmess_byte_decryption(conv_data->req_length_decoder,
+        tvb_get_ptr(tvb, 0, aeadRespLengthSize + 16),
+        aeadRespLengthSize + 16,
+        AEADRespLengthSerializedByte,
+        aeadRespLengthSize,
+        NULL, 0);
+    if (err != 0) {
+        vmess_debug_printf("VMess resp length decryption failed: %s.\n", gcry_strsource(err));
+        return false; /* Decryption failed */
+    }
+    /* TODO: Validate if the resp length could be decrypted correctly */
+    /* Get the length of header. */
+    guint16 aeadRespLength = (guint16)AEADRespLengthSerializedByte[0] << 8 | (guint16)AEADRespLengthSerializedByte[1];
+
+    /* DO NOT free the respLengthAEADNonce. */
+    g_free(respLengthAEADKey);
+    g_free(AEADRespLengthSerializedByte);
+    return TRUE;
+}
+
 int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     proto_tree* vmess_tree;
     proto_item* ti;
@@ -412,7 +483,13 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
     vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     proto_tree_add_item(vmess_tree, hf_vmess_response_header, tvb, 0, 38, ENC_BIG_ENDIAN);
     proto_tree_add_item(vmess_tree, hf_vmess_payload_length, tvb, 38, 2, ENC_BIG_ENDIAN);
-    
+
+    /* Decrypt response header */
+    if (!conv_data->resp_decrypted) {
+        gboolean success = decrypt_vmess_response(tvb, pinfo, vmess_tree, offset, conv_data);
+        if (!success) return 0; /* Give up decryption upon failure. */
+        conv_data->resp_decrypted = TRUE;
+    }
 
     next_tvb = tvb_new_subset_remaining(tvb, 40);
 
@@ -618,15 +695,15 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 
     bool is_request = false;
 
-    if (conv_data->auth_missing) {
-        vmess_debug_printf("No auth for this VMess conversation, further dissection impossible. Frame: %d.\n",
-            pinfo->fd->num);
-        /* It should really be a heuristic dissection trial. */
-        return tvb_captured_length(tvb);
-    }
+    //if (conv_data->auth_missing) {
+    //    vmess_debug_printf("No auth for this VMess conversation, further dissection impossible. Frame: %d.\n",
+    //        pinfo->fd->num);
+    //    /* It should really be a heuristic dissection trial. */
+    //    return tvb_captured_length(tvb);
+    //}
 
     /* The request could be dissected only once, since it occupies exactly one packet. */
-    if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
+    if (tvb_reported_length(tvb) > 61 && !conv_data->req_decrypted) { /* Minimum VMess request length */
         gchar* tmp_auth_raw_data = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth_raw_data, (VMESS_AUTH_LENGTH + 1));
 
@@ -652,43 +729,77 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
              * However, when securityNone is used, the right approach is to use heuristic dissector to 
              * dissect later VMess data/response packets. This idea would be implemented in the future.
              */
-            conv_data->auth_missing = TRUE;
+            //conv_data->auth_missing = TRUE;
             g_string_free(tmp_auth, true);
-            vmess_debug_printf("Unable to find auth for this VMess conversation, further dissection impossible. Frame: %d.\n",
+            vmess_debug_printf("Unable to find auth in this packet, further dissection impossible. Frame: %d.\n",
                 pinfo->fd->num);
             return tvb_captured_length(tvb);
-
         }
     }
 
     if (is_request) {
-
         dissect_vmess_request(tvb, pinfo, tree, data);
-
         vmess_debug_flush();
-
         return tvb_captured_length(tvb);
     }
 
-    bool is_response = false;
-    gint pos = tvb_find_TLS_signiture(tvb);
-    if (pos == 40) is_response = true;
+    /* If not a request, all the later dissection is possible only when VMess Request is decrypted successfully */
+    if (!conv_data->req_decrypted) {
+        return tvb_captured_length(tvb);
+    }
+
+    /* After encryption, this simple approach would fail. */
+    //bool is_response = false;
+    //gint pos = tvb_find_TLS_signiture(tvb);
+    //if (pos == 40) is_response = true;
 
     save_port_type = pinfo->ptype;
     pinfo->ptype = PT_NONE;
     save_can_desegment = pinfo->can_desegment;
     pinfo->can_desegment = pinfo->saved_can_desegment;
 
-    if (conv_data && is_response && pinfo->num > conv_data->startframe) {
-        tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
-            VMESS_RESPONSE_HEADER_LENGTH,
-            get_dissect_vmess_response_len,
-            dissect_vmess_response_pdu, data);
-    }
-    else {
+    //if (conv_data && is_response && pinfo->num > conv_data->startframe) {
+    //    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
+    //        VMESS_RESPONSE_HEADER_LENGTH,
+    //        get_dissect_vmess_response_len,
+    //        dissect_vmess_response_pdu, data);
+    //}
+    //else {
+    //    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
+    //        VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
+    //        dissect_vmess_data_pdu, data);
+    //}
+
+    /*
+    * If req_decrypted is TRUE, the further decryption could be performed:
+    * + For packets client->server, the TCP reassembly does not depend on VMess response,
+    * the decryption could always be performed.
+    * 
+    * + For packets server->client, the first packets should be the VMess Response along with
+    * some data. One could do decryption on data part without decrypting the Response header,
+    * which is used as heuristic dissection. Currently, we perform the full dissection, i.e., 
+    * only when the VMess Response is decrypted successfully should we continue to decrypt
+    * succeeding data packets.
+    */
+
+    gboolean from_server = vmess_packet_from_server(conv_data, pinfo);
+    if (!from_server) { /* Since VMess Request has been dissected, the client side would only send VMess Data packets */
         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
             VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
             dissect_vmess_data_pdu, data);
+    }
+    else {
+        if (!conv_data->resp_decrypted) { 
+            tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
+                VMESS_RESPONSE_HEADER_LENGTH,
+                get_dissect_vmess_response_len,
+                dissect_vmess_response_pdu, data);
+        }
+        else {
+            tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
+                VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
+                dissect_vmess_data_pdu, data);
+        }
     }
 
     pinfo->ptype = save_port_type;
@@ -1610,7 +1721,8 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess
     conv_data->cli_data_decoder = NULL;
     conv_data->count_reader = 0;
     conv_data->count_writer = 0;
-    conv_data->auth_missing = FALSE;
+    //conv_data->auth_missing = FALSE;
+
     /* Defer the port and address initialization to dissect VMess Request */
 
     /* Add the conv_data to the conversation in this routine. */

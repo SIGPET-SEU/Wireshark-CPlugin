@@ -345,6 +345,12 @@ vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id);
 int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
     vmess_message_info_t* msg);
 
+int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
+    vmess_message_info_t* msg);
+
+int dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree * vmess_tree,
+    proto_tree* tree _U_, vmess_message_info_t* msg, vmess_conv_t* conv_data);
+
 /**
  * Encapsulate the conv_data fetching process:
  * 

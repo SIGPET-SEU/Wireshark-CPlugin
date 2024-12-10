@@ -303,7 +303,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
     message->type = VMESS_REQUEST;
     message->data_len = aeadPayloadLength;
-    message->id = 0; /* Should be record_id, set to 0 for testing purpose */
+    message->id = tvb_raw_offset(tvb) + offset; /* Should be record_id, set to 0 for testing purpose */
     message->plain_data = wmem_memdup(wmem_file_scope(), aeadPayload, aeadPayloadLength);
     message->next = NULL;
 
@@ -312,6 +312,8 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         pmessages = &(*pmessages)->next;
     *pmessages = message; /* Append to the tail */
 
+    g_free(payloadHeaderAEADKey);
+    g_free(aeadPayload);
     return true;
 }
 
@@ -333,14 +335,16 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     copy_address_wmem(wmem_file_scope(), &conv_data->srv_addr, &pinfo->dst);
     conv_data->srv_port = pinfo->destport;
 
+    guint offset = 0;
+
     /* If the header packet is decrypted, try to perform decryption */
     if (!conv_data->req_decrypted){
-        gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, 0, conv_data);
+        gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, offset, conv_data);
         if (!success) return 0; /* Give up decryption upon failure. */
         conv_data->req_decrypted = TRUE;
     }
 
-    vmess_message_info_t* msg = get_vmess_message(pinfo, 0);
+    vmess_message_info_t* msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
     if (!msg)
         return 0;
 
@@ -358,7 +362,7 @@ int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tre
     proto_tree* opt_tree;
 
     tvbuff_t* packet_tvb = tvb_new_child_real_data(tvb, plaintext, plaintext_len, plaintext_len);
-    add_new_data_source(pinfo, packet_tvb, "Decrypted VMess");
+    add_new_data_source(pinfo, packet_tvb, "Decrypted VMess Request");
 
     /* Dissect Opt as a subtree and add human-friendly info */
     guint8 opt = (guint8)plaintext[34];
@@ -383,6 +387,46 @@ int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tre
 
     /* TODO: Check F and log possible warnings */
 
+    return 0;
+}
+
+int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, vmess_message_info_t* msg)
+{
+    guchar* plaintext = msg->plain_data;
+    guint plaintext_len = msg->data_len;
+    proto_item* opt_ti;
+    proto_tree* opt_tree;
+
+    tvbuff_t* packet_tvb = tvb_new_child_real_data(tvb, plaintext, plaintext_len, plaintext_len);
+    add_new_data_source(pinfo, packet_tvb, "Decrypted VMess Response");
+    return 0;
+}
+
+int
+dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
+                            proto_tree* vmess_tree, proto_tree* tree _U_,
+                            vmess_message_info_t* msg, vmess_conv_t* conv_data)
+{
+    guchar* plaintext = msg->plain_data;
+    guint plaintext_len = msg->data_len;
+    port_type save_port_type;
+    guint16 save_can_desegment;
+
+    tvbuff_t* packet_tvb = tvb_new_child_real_data(tvb, plaintext, plaintext_len, plaintext_len);
+    add_new_data_source(pinfo, packet_tvb, "Decrypted VMess Data");
+    /* Defer the call to higher level dissector here */
+    save_port_type = pinfo->ptype;
+    pinfo->ptype = PT_NONE;
+    save_can_desegment = pinfo->can_desegment;
+    pinfo->can_desegment = pinfo->saved_can_desegment;
+
+    reassemble_streaming_data_and_call_subdissector(packet_tvb, pinfo, 0, tvb_reported_length_remaining(packet_tvb, 0),
+        vmess_tree, tree, proto_vmess_streaming_reassembly_table,
+        conv_data->reassembly_info, get_virtual_frame_num64(packet_tvb, pinfo, 0), tls_handle,
+        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
+
+    pinfo->ptype = save_port_type;
+    pinfo->can_desegment = save_can_desegment;
     return 0;
 }
 
@@ -420,7 +464,7 @@ decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guin
 
     gcry_md_close(data_key_hd);
     gcry_md_close(data_iv_hd);
-    /************************ Header Length AEAD Decryption ************************/
+    /************************ Response Length AEAD Decryption ************************/
     guchar* respLengthAEADKey = g_malloc(AES_128_KEY_SIZE);
     /* respLengthAEADNonce should have the same liftspan as the decoder.
      * See https://docs.gtk.org/glib/type_func.ByteArray.append.html
@@ -452,13 +496,63 @@ decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guin
         vmess_debug_printf("VMess resp length decryption failed: %s.\n", gcry_strsource(err));
         return false; /* Decryption failed */
     }
+
     /* TODO: Validate if the resp length could be decrypted correctly */
     /* Get the length of header. */
     guint16 aeadRespLength = (guint16)AEADRespLengthSerializedByte[0] << 8 | (guint16)AEADRespLengthSerializedByte[1];
-
     /* DO NOT free the respLengthAEADNonce. */
     g_free(respLengthAEADKey);
     g_free(AEADRespLengthSerializedByte);
+
+    /*************************** Response Payload Decryption ******************************/
+    guchar* respPayloadAEADKey = g_malloc(AES_128_KEY_SIZE);
+    guchar* respPayloadAEADNonce = wmem_alloc(wmem_file_scope(), GCM_IV_SIZE);
+    /* Initialize the request_len_decoder */
+    tmp_derived_key = vmess_kdf(resp_key->str, resp_key->len, 1, kdfSaltConstAEADRespHeaderPayloadKey);
+    memcpy(respPayloadAEADKey, tmp_derived_key, AES_128_KEY_SIZE);
+    g_free(tmp_derived_key);
+
+    tmp_derived_key = vmess_kdf(resp_iv->str, resp_iv->len, 1, kdfSaltConstAEADRespHeaderPayloadIV);
+    memcpy(respPayloadAEADNonce, tmp_derived_key, GCM_IV_SIZE);
+    g_free(tmp_derived_key);
+    conv_data->resp_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
+        respPayloadAEADKey, respPayloadAEADNonce, 0);
+    guchar* aeadResp = g_malloc(aeadRespLength);
+    err = vmess_byte_decryption(conv_data->resp_decoder,
+        tvb_get_ptr(tvb, 18, aeadRespLength + 16),
+        aeadRespLength + 16,
+        aeadResp, aeadRespLength,
+        NULL, 0);
+    if (err != 0) {
+        vmess_debug_printf("VMess response payload decryption failed: %s.\n", gcry_strsource(err));
+        return false; /* Decryption failed */
+    }
+
+    /* Store necessary information into packet and message structures */
+    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+    if (!packet) {
+        packet = wmem_new0(wmem_file_scope(), vmess_packet_info_t);
+        packet->from_server = FALSE;
+        packet->messages = NULL;
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
+    }
+
+    gint record_id = tvb_raw_offset(tvb) + offset;
+
+    vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
+    message->type = VMESS_RESPONSE;
+    message->data_len = aeadRespLength;
+    message->id = tvb_raw_offset(tvb) + offset; /* Should be record_id, set to 0 for testing purpose */
+    message->plain_data = wmem_memdup(wmem_file_scope(), aeadResp, aeadRespLength);
+    message->next = NULL;
+
+    vmess_message_info_t** pmessages = &packet->messages;
+    while (*pmessages) /* Iterate to the tail */
+        pmessages = &(*pmessages)->next;
+    *pmessages = message; /* Append to the tail */
+
+    g_free(respPayloadAEADKey);
+    g_free(aeadResp);
     return TRUE;
 }
 
@@ -490,16 +584,36 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
         if (!success) return 0; /* Give up decryption upon failure. */
         conv_data->resp_decrypted = TRUE;
     }
-
-    next_tvb = tvb_new_subset_remaining(tvb, 40);
-
-    if (next_tvb) {
-        reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
-            vmess_tree, tree, proto_vmess_streaming_reassembly_table,
-            conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
-            proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
+    vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
+    if (!resp_msg) {
+        vmess_debug_printf("VMess response message not found, further dissection impossible./n");
     }
 
+    dissect_decrypted_vmess_response(tvb, pinfo, tree, resp_msg);
+
+    offset = 38;
+
+    /* Since a response packet is usually followed by a data packet, we try to do data dissection here */
+    if (tvb_reported_length_remaining(tvb, offset) > 0) {
+        /* There is some data following the response */
+        gboolean success = decrypt_vmess_data(tvb, pinfo, vmess_tree, offset, conv_data);
+        if (!success) return 0; /* Give up decryption upon failure. */
+    }
+
+    //next_tvb = tvb_new_subset_remaining(tvb, 40);
+
+    //if (next_tvb) {
+    //    reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
+    //        vmess_tree, tree, proto_vmess_streaming_reassembly_table,
+    //        conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
+    //        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
+    //}
+
+    vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
+    if (!data_msg)
+        return 0;
+
+    dissect_decrypted_vmess_data(tvb, pinfo, vmess_tree, tree, data_msg, conv_data);
     return 0;
 }
 
@@ -549,6 +663,13 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
     }
 
     gboolean is_from_server = vmess_packet_from_server(conv_data, pinfo);
+
+    /* TODO: Perform decryption */
+    guint16 data_length = tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
+
+    guint16 plaintext_len = data_length - 16; /* ONLY works for AES-128-GCM */
+    guchar* plaintext = g_malloc(plaintext_len);
+
     if (is_from_server) {
         /* Initialize srv_decoder */
         /* NOTE: data_iv->str is 16 bytes long, and AES-128-GCM only uses the first 12 bytes of it. */
@@ -582,14 +703,9 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         memcpy(&iv[2], &conv_data->srv_data_decoder->write_iv->str[2], 10); /* Awkward copy */
         vmess_decoder_reset_iv(conv_data->srv_data_decoder, iv, iv_len);
         g_free(iv);
-        /* TODO: Perform decryption */
-        guint16 data_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
-
-        guint16 plaintext_len = data_length - 16; /* ONLY works for AES-128-GCM */
-        guchar* plaintext = g_malloc(plaintext_len);
         /* In data blocks, no AD is used. */
         gcry_error_t err = vmess_byte_decryption(conv_data->srv_data_decoder,
-            tvb_get_ptr(tvb, 2, data_length),
+            tvb_get_ptr(tvb, 2 + offset, data_length),
             data_length,
             plaintext,
             plaintext_len,
@@ -602,8 +718,6 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
     }
     else {
         /* Initialize cli_decoder */
-        conv_data->cli_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
-                                        data_key->str, data_iv->str, 0);
         if (!conv_data->cli_data_decoder) {
             conv_data->cli_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
                 data_key->str, data_iv->str, 0);
@@ -615,14 +729,9 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         memcpy(&iv[2], &conv_data->cli_data_decoder->write_iv->str[2], 10); /* Awkward copy */
         vmess_decoder_reset_iv(conv_data->cli_data_decoder, iv, iv_len);
         g_free(iv);
-        /* TODO: Perform decryption */
-        guint16 data_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
-
-        guint16 plaintext_len = data_length - 16; /* ONLY works for AES-128-GCM */
-        guchar* plaintext = g_malloc(plaintext_len);
         /* In data blocks, no AD is used. */
         gcry_error_t err = vmess_byte_decryption(conv_data->cli_data_decoder,
-            tvb_get_ptr(tvb, 2, data_length),
+            tvb_get_ptr(tvb, 2 + offset, data_length),
             data_length,
             plaintext,
             plaintext_len,
@@ -632,7 +741,30 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
             return false; /* Decryption failed */
         }
         conv_data->count_writer++;
-    }  
+    }
+
+    /* Store necessary information into packet and message structures */
+    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+    if (!packet) {
+        packet = wmem_new0(wmem_file_scope(), vmess_packet_info_t);
+        packet->from_server = FALSE;
+        packet->messages = NULL;
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
+    }
+
+    gint record_id = tvb_raw_offset(tvb) + offset;
+
+    vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
+    message->type = VMESS_DATA;
+    message->data_len = plaintext_len;
+    message->id = tvb_raw_offset(tvb) + offset; /* Should be record_id, set to 0 for testing purpose */
+    message->plain_data = wmem_memdup(wmem_file_scope(), plaintext, plaintext_len);
+    message->next = NULL;
+
+    vmess_message_info_t** pmessages = &packet->messages;
+    while (*pmessages) /* Iterate to the tail */
+        pmessages = &(*pmessages)->next;
+    *pmessages = message; /* Append to the tail */
 
     return TRUE;
 }
@@ -660,7 +792,7 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     /* TODO: Perform decryption on the tvb */
     guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
 
-    gboolean success = decrypt_vmess_data(tvb, pinfo, tree, 0, conv_data);
+    gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
     if (!success) {
         vmess_debug_printf("VMess data decryption failed, higher level dissection is impossible.\n");
     }
@@ -674,6 +806,11 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     //        conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
     //        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
     //}
+    vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
+    if (!data_msg)
+        return 0;
+
+    dissect_decrypted_vmess_data(tvb, pinfo, vmess_tree, tree, data_msg, conv_data);
 
     return 0;
 }

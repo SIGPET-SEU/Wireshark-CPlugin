@@ -442,7 +442,7 @@ decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guin
     guint aeadRespLengthSize = 2;
     guchar* AEADRespLengthSerializedByte = g_malloc(aeadRespLengthSize);
 
-    gcry_error_t err = vmess_byte_decryption(conv_data->req_length_decoder,
+    gcry_error_t err = vmess_byte_decryption(conv_data->resp_length_decoder,
         tvb_get_ptr(tvb, 0, aeadRespLengthSize + 16),
         aeadRespLengthSize + 16,
         AEADRespLengthSerializedByte,

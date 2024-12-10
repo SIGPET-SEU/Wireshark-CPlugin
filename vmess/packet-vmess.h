@@ -300,15 +300,6 @@ typedef struct _vmess_conv_t {
     guint16 count_writer;   /* The counter for AEAD client (writer) */
     guint16 count_reader;   /* The counter for AEAD server (reader) */
 
-    ///*
-    //* This variable is used to track if we could find the auth for the current conversation,
-    //* which should be impossible if not found since encryption method is stored in the VMess Request packet.
-    //* 
-    //* Nevertheless, if securityNone is set, i.e., no data encryption is used, it should try 
-    //* heuristic dissection. Currently, we just ignore the heuristic one.
-    //*/
-    //gboolean auth_missing;
-
     /* Fields related to proxied/tunneled/Upgraded connections. */
     guint32	 startframe;	/* First frame of proxied connection */
     int    	 startoffset;	/* Offset within the frame where the new protocol begins. */

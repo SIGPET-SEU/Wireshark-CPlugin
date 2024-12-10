@@ -600,15 +600,6 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
         if (!success) return 0; /* Give up decryption upon failure. */
     }
 
-    //next_tvb = tvb_new_subset_remaining(tvb, 40);
-
-    //if (next_tvb) {
-    //    reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
-    //        vmess_tree, tree, proto_vmess_streaming_reassembly_table,
-    //        conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
-    //        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
-    //}
-
     vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
     if (!data_msg)
         return 0;
@@ -796,16 +787,6 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     if (!success) {
         vmess_debug_printf("VMess data decryption failed, higher level dissection is impossible.\n");
     }
-
-    /* TODO: The next_tvb should be the decrypted one */
-    //next_tvb = tvb_new_subset_length(tvb, 2, payload_length);
-
-    //if (next_tvb) {
-    //    reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
-    //        vmess_tree, tree, proto_vmess_streaming_reassembly_table,
-    //        conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
-    //        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
-    //}
     vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
     if (!data_msg)
         return 0;
@@ -831,13 +812,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
     vmess_keylog_read();
 
     bool is_request = false;
-
-    //if (conv_data->auth_missing) {
-    //    vmess_debug_printf("No auth for this VMess conversation, further dissection impossible. Frame: %d.\n",
-    //        pinfo->fd->num);
-    //    /* It should really be a heuristic dissection trial. */
-    //    return tvb_captured_length(tvb);
-    //}
 
     /* The request could be dissected only once, since it occupies exactly one packet. */
     if (tvb_reported_length(tvb) > 61 && !conv_data->req_decrypted) { /* Minimum VMess request length */
@@ -866,7 +840,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
              * However, when securityNone is used, the right approach is to use heuristic dissector to 
              * dissect later VMess data/response packets. This idea would be implemented in the future.
              */
-            //conv_data->auth_missing = TRUE;
             g_string_free(tmp_auth, true);
             vmess_debug_printf("Unable to find auth in this packet, further dissection impossible. Frame: %d.\n",
                 pinfo->fd->num);
@@ -884,28 +857,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
     if (!conv_data->req_decrypted) {
         return tvb_captured_length(tvb);
     }
-
-    /* After encryption, this simple approach would fail. */
-    //bool is_response = false;
-    //gint pos = tvb_find_TLS_signiture(tvb);
-    //if (pos == 40) is_response = true;
-
-    //save_port_type = pinfo->ptype;
-    //pinfo->ptype = PT_NONE;
-    //save_can_desegment = pinfo->can_desegment;
-    //pinfo->can_desegment = pinfo->saved_can_desegment;
-
-    //if (conv_data && is_response && pinfo->num > conv_data->startframe) {
-    //    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
-    //        VMESS_RESPONSE_HEADER_LENGTH,
-    //        get_dissect_vmess_response_len,
-    //        dissect_vmess_response_pdu, data);
-    //}
-    //else {
-    //    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
-    //        VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
-    //        dissect_vmess_data_pdu, data);
-    //}
 
     /*
     * If req_decrypted is TRUE, the further decryption could be performed:
@@ -926,7 +877,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
             dissect_vmess_data_pdu, data);
     }
     else {
-        if (!conv_data->resp_decrypted) { 
+        if (!conv_data->resp_decrypted) {
             tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
                 VMESS_RESPONSE_HEADER_LENGTH,
                 get_dissect_vmess_response_len,
@@ -938,9 +889,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 dissect_vmess_data_pdu, data);
         }
     }
-
-    //pinfo->ptype = save_port_type;
-    //pinfo->can_desegment = save_can_desegment;
 
     vmess_debug_flush();
 
@@ -1430,43 +1378,6 @@ vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, 
     g_free(calc_tag);
     return err;
 }
-
-///**
-// * vmess_equal and vmess_hash are stolen from packet-tls-utils.c
-// */
-//gboolean vmess_equal(gconstpointer a, gconstpointer b) {
-//    const GByteArray* val1;
-//    const GByteArray* val2;
-//    val1 = (const GByteArray*)a;
-//    val2 = (const GByteArray*)b;
-//
-//    if (val1->len == val2->len &&
-//        !memcmp(val1->data, val2->data, val2->len)) {
-//        return 1;
-//    }
-//    return 0;
-//};
-//
-//guint vmess_hash(gconstpointer v) {
-//    const GByteArray* arr;
-//    guint l, hash;
-//    const guint* cur;
-//    hash = 0;
-//    arr = (const GByteArray*)v;
-//
-//    /*  id and id->data are mallocated in ssl_save_master_key().  As such 'data'
-//     *  should be aligned for any kind of access (for example as a guint as
-//     *  is done below).  The intermediate void* cast is to prevent "cast
-//     *  increases required alignment of target type" warnings on CPUs (such
-//     *  as SPARCs) that do not allow misaligned memory accesses.
-//     */
-//    cur = (const guint*)(void*)arr->data;
-//
-//    for (l = 4; (l < arr->len); l += 4, cur++)
-//        hash = hash ^ (*cur);
-//
-//    return hash;
-//}
 
 void vmess_common_init(vmess_key_map_t* km)
 {

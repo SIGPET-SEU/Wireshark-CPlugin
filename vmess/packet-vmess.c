@@ -753,10 +753,10 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
     //gint pos = tvb_find_TLS_signiture(tvb);
     //if (pos == 40) is_response = true;
 
-    save_port_type = pinfo->ptype;
-    pinfo->ptype = PT_NONE;
-    save_can_desegment = pinfo->can_desegment;
-    pinfo->can_desegment = pinfo->saved_can_desegment;
+    //save_port_type = pinfo->ptype;
+    //pinfo->ptype = PT_NONE;
+    //save_can_desegment = pinfo->can_desegment;
+    //pinfo->can_desegment = pinfo->saved_can_desegment;
 
     //if (conv_data && is_response && pinfo->num > conv_data->startframe) {
     //    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
@@ -802,8 +802,8 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
         }
     }
 
-    pinfo->ptype = save_port_type;
-    pinfo->can_desegment = save_can_desegment;
+    //pinfo->ptype = save_port_type;
+    //pinfo->can_desegment = save_can_desegment;
 
     vmess_debug_flush();
 

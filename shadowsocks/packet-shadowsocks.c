@@ -89,12 +89,13 @@ void proto_reg_handoff_shadowsocks(void);
 void proto_register_shadowsocks(void);
 
 static shadowsocks_conv_t *get_shadowsocks_conv(conversation_t *conv, int proto);
-static void update_shadowsocks_stage(shadowsocks_server_stage_e *last_stage, shadowsocks_server_stage_e *cur_stage, uint32_t payload_size) _U_;
+static void update_shadowsocks_stage(shadowsocks_server_stage_e *last_stage, shadowsocks_server_stage_e *cur_stage, uint32_t payload_size);
 
 static void set_cipher_size(cipher_type_e cipher_type);
 static gcry_error_t shadowsocks_kdf(const char *password, uint32_t password_len, uint8_t *out, uint32_t out_len);
 static void init_shadowsocks_cipher_handle(shadowsocks_meta_cipher_t *meta_cipher);
-static void increment(uint8_t *b, uint32_t b_len) _U_;
+static void increment(uint8_t *b, uint32_t b_len);
+static void decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *nonce);
 
 /********** Protocol Handles **********/
 static int proto_shadowsocks;
@@ -157,8 +158,8 @@ void dissect_shadowsocks_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto
 
 void dissect_shadowsocks_stage_addr(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data _U_, proto_tree *shadowsocks_tree _U_, proto_tree *meta_cipher_tree, uint32_t *pkt_idx)
 {
-    gcry_error_t err;
-    uint8_t *cur_nonce = wmem_new0(wmem_file_scope(), uint8_t);
+    uint8_t *nonce = wmem_new0(wmem_file_scope(), uint8_t);
+    uint8_t *tvb_copy = tvb_memdup(wmem_file_scope(), tvb, 0, tvb_captured_length(tvb));
 
     if (!conv_data->shadowsocks_meta_cipher.is_handle_initialized)
     {
@@ -166,55 +167,26 @@ void dissect_shadowsocks_stage_addr(tvbuff_t *tvb, packet_info *pinfo _U_, proto
         return;
     }
 
-    /* Lookup the nonce */
-    cur_nonce = (uint8_t *)g_hash_table_lookup(conv_data->nonce_map, pkt_idx);
-    if (!cur_nonce)
+    /*** Nonce ***/
+    nonce = (uint8_t *)g_hash_table_lookup(conv_data->nonce_map, pkt_idx);
+    if (!nonce)
     {
         uint8_t *tmp_nonce = wmem_new0(wmem_file_scope(), uint8_t);
         memcpy(tmp_nonce, conv_data->shadowsocks_meta_cipher.nonce, cipher_nonce_size);
         g_hash_table_insert(conv_data->nonce_map, pkt_idx, tmp_nonce);
+        increment(conv_data->shadowsocks_meta_cipher.nonce, cipher_nonce_size);
+        increment(conv_data->shadowsocks_meta_cipher.nonce, cipher_nonce_size);
     }
-    cur_nonce = (uint8_t *)g_hash_table_lookup(conv_data->nonce_map, pkt_idx);
-    if (!cur_nonce)
+    nonce = (uint8_t *)g_hash_table_lookup(conv_data->nonce_map, pkt_idx);
+    if (!nonce)
     {
         report_failure("Failed to lookup the nonce of packet %u", *pkt_idx);
         return;
     }
-    proto_tree_add_bytes(meta_cipher_tree, hf_shadowsocks_nonce, tvb, 0, cipher_nonce_size, cur_nonce);
+    proto_tree_add_bytes(meta_cipher_tree, hf_shadowsocks_nonce, tvb, 0, cipher_nonce_size, nonce);
 
-    /* Decrypt the payload */
-    uint32_t tmp_buf_size = 2 + cipher_tag_size;
-    uint8_t *tmp_buf = wmem_alloc0(wmem_file_scope(), tmp_buf_size * sizeof(uint8_t));
-    uint8_t *encrypted_data = tvb_memdup(wmem_file_scope(), tvb, 0, tvb_captured_length(tvb));
-    err = gcry_cipher_setiv(conv_data->shadowsocks_meta_cipher.cipher_hd, cur_nonce, cipher_nonce_size);
-    DISSECTOR_ASSERT(err == 0);
-    err = gcry_cipher_decrypt(conv_data->shadowsocks_meta_cipher.cipher_hd, tmp_buf, tmp_buf_size, encrypted_data, 2 + cipher_tag_size);
-    DISSECTOR_ASSERT(err == 0);
-    increment(conv_data->shadowsocks_meta_cipher.nonce, cipher_nonce_size);
-    /* Calculate the size of the decrypted data */
-    uint32_t real_size = (((int)tmp_buf[0] << 8) + (int)tmp_buf[1]) & PAYLOAD_SIZE_MASK;
-    if (real_size == 0)
-    {
-        report_failure("Failed to decrypt the payload: zero chunk");
-        return;
-    }
-    printf("Real size: %u\n", real_size);
-
-    // FIXME: Some problems with the decryption
-#if 0
-    uint8_t *decrypted_data = wmem_alloc0(wmem_file_scope(), (real_size + cipher_tag_size) * sizeof(uint8_t));
-    err = gcry_cipher_setiv(conv_data->shadowsocks_meta_cipher.cipher_hd, cur_nonce, cipher_nonce_size);
-    DISSECTOR_ASSERT(err == 0);
-    err = gcry_cipher_decrypt(conv_data->shadowsocks_meta_cipher.cipher_hd, decrypted_data, real_size + cipher_tag_size, encrypted_data, real_size + cipher_tag_size);
-    increment(conv_data->shadowsocks_meta_cipher.nonce, cipher_nonce_size);
-
-    printf("Decrypted data: ");
-    for (uint32_t i = 0; i < real_size; i++)
-    {
-        printf("%02x ", decrypted_data[i]);
-    }
-    printf("\n");
-#endif
+    /*** Decryption ***/
+    decrypt_payload(conv_data->shadowsocks_meta_cipher.cipher_hd, tvb_copy, nonce);
 }
 
 /**
@@ -448,9 +420,7 @@ void proto_reg_handoff_shadowsocks(void)
  */
 static shadowsocks_conv_t *get_shadowsocks_conv(conversation_t *conv, int proto)
 {
-    shadowsocks_conv_t *conv_data;
-
-    conv_data = (shadowsocks_conv_t *)conversation_get_proto_data(conv, proto);
+    shadowsocks_conv_t *conv_data = (shadowsocks_conv_t *)conversation_get_proto_data(conv, proto);
     if (conv_data)
     {
         return conv_data;
@@ -507,8 +477,8 @@ static void update_shadowsocks_stage(shadowsocks_server_stage_e *last_stage, sha
         if (*cur_stage == STAGE_UNSET)
         {
             // TODO: Temporary solution
-            shadowsocks_server_stage_e new_stage = (*last_stage + 1) % 6;
-            *cur_stage = new_stage;
+            shadowsocks_server_stage_e tmp_new_stage = (*last_stage + 1) % 6;
+            *cur_stage = tmp_new_stage;
             *last_stage = *cur_stage;
         }
     }
@@ -729,6 +699,51 @@ static void increment(uint8_t *b, uint32_t b_len)
             break;
         }
     }
+}
+
+static void decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *nonce)
+{
+    uint8_t *nonce_copy = wmem_memdup(wmem_file_scope(), nonce, cipher_nonce_size);
+    uint8_t *size_part_copy = wmem_memdup(wmem_file_scope(), in, 2 + cipher_tag_size);
+    uint8_t *data_part_copy; // The size will be determined later
+
+    gcry_error_t err;
+
+    /* Decryption result */
+    uint32_t real_data_size;
+    uint8_t *data_part;
+
+    /* Decrypt the size part */
+    uint8_t *tmp_buf = wmem_alloc0(wmem_file_scope(), 2 + cipher_tag_size);
+    err = gcry_cipher_setiv(cipher_hd, nonce_copy, cipher_nonce_size);
+    DISSECTOR_ASSERT(err == 0);
+    err = gcry_cipher_decrypt(cipher_hd, tmp_buf, 2 + cipher_tag_size, size_part_copy, 2 + cipher_tag_size);
+    DISSECTOR_ASSERT(err == 0);
+    increment(nonce_copy, cipher_nonce_size);
+    real_data_size = (((int)tmp_buf[0] << 8) + (int)tmp_buf[1]) & PAYLOAD_SIZE_MASK;
+    if (real_data_size == 0)
+    {
+        report_failure("Failed to decrypt the payload: zero chunk");
+        return;
+    }
+
+    /* Decrypt the data part */
+    data_part_copy = wmem_memdup(wmem_file_scope(), in + 2 + cipher_tag_size, real_data_size + cipher_tag_size);
+    data_part = wmem_alloc0(wmem_file_scope(), real_data_size + cipher_tag_size);
+    err = gcry_cipher_setiv(cipher_hd, nonce_copy, cipher_nonce_size);
+    DISSECTOR_ASSERT(err == 0);
+    err = gcry_cipher_decrypt(cipher_hd, data_part, real_data_size + cipher_tag_size, data_part_copy, real_data_size + cipher_tag_size);
+    DISSECTOR_ASSERT(err == 0);
+    increment(nonce_copy, cipher_nonce_size);
+
+    // DEBUG
+    printf("Real payload size: %u\n", real_data_size);
+    printf("Decrypted data: ");
+    for (uint32_t i = 0; i < real_data_size; i++)
+    {
+        printf("%02x ", data_part[i]);
+    }
+    printf("\n");
 }
 
 /*

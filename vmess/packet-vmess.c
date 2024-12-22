@@ -24,6 +24,7 @@
 #include <epan/expert.h>
 #include <epan/proto_data.h>
 #include <epan/conversation.h>
+#include <wsutil/filesystem.h>
 #include <epan/dissectors/packet-tcp.h>
 #include <wsutil/str_util.h>
 #include <wsutil/file_util.h>

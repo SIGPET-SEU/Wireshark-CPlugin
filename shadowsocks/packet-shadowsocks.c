@@ -79,6 +79,8 @@ typedef struct _shadowsocks_conv_t
     shadowsocks_meta_cipher_t shadowsocks_meta_cipher;
 
     shadowsocks_server_stage_e last_stage;
+
+    tvbuff_t *next_tvb;
 } shadowsocks_conv_t;
 
 /********** Function Prototypes **********/
@@ -98,7 +100,7 @@ static void increment(uint8_t *b, uint32_t b_len);
 static uint8_t *get_shadowsocks_nonce(uint32_t *pkt_idx, uint8_t *last_nonce);
 static void decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *nonce, uint8_t *out, uint32_t *real_size);
 
-static void debug_display_hash_table(GHashTable *hash_table) _U_;
+static void debug_display_hash_table(wmem_map_t *hash_table) _U_;
 
 /********** Protocol Handles **********/
 static int proto_shadowsocks;
@@ -115,6 +117,14 @@ static int hf_shadowsocks_derived_key;
 static int hf_shadowsocks_salt;
 static int hf_shadowsocks_subkey;
 static int hf_shadowsocks_nonce;
+/* Address */
+static int hf_shadowsocks_addr;
+static int hf_shadowsocks_atyp;
+static int hf_shadowsocks_addr_ipv4;
+static int hf_shadowsocks_addr_domain_len;
+static int hf_shadowsocks_addr_domain;
+static int hf_shadowsocks_addr_ipv6;
+static int hf_shadowsocks_port;
 
 /********** Expert Fields **********/
 static expert_field ei_shadowsocks_salt _U_;
@@ -122,6 +132,7 @@ static expert_field ei_shadowsocks_salt _U_;
 /********** Subtree pointers **********/
 static int ett_shadowsocks;
 static int ett_shadowsocks_meta_cipher;
+static int ett_shadowsocks_addr;
 
 /********** Preferences **********/
 /* Cipher preference */
@@ -142,15 +153,15 @@ static uint32_t cipher_nonce_size = HPKE_AEAD_NONCE_LENGTH;
 static uint32_t cipher_tag_size = 16;
 static uint8_t cipher_derived_key[AEAD_MAX_KEY_LENGTH];
 /* Hash tables (use pinfo->num as key) */
-GHashTable *hash_table_stage;
-GHashTable *hash_table_nonce;
+wmem_map_t *hash_table_stage;
+wmem_map_t *hash_table_nonce;
 
 void dissect_shadowsocks_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree)
 {
     proto_tree_add_item(shadowsocks_tree, hf_shadowsocks_salt, tvb, 0, cipher_salt_size, ENC_BIG_ENDIAN);
     if (!conv_data->shadowsocks_meta_cipher.is_salt_set)
     {
-        tvb_memcpy(tvb, conv_data->shadowsocks_meta_cipher.salt, 0, cipher_salt_size);
+        conv_data->shadowsocks_meta_cipher.salt = tvb_memdup(wmem_file_scope(), tvb, 0, cipher_salt_size);
         conv_data->shadowsocks_meta_cipher.is_salt_set = true;
     }
 
@@ -162,7 +173,42 @@ void dissect_shadowsocks_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto
     }
 }
 
-void dissect_decrypted_shadowsocks_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree _U_, proto_tree *meta_cipher_tree, uint32_t *pkt_idx)
+void dissect_shadowsocks_stage_addr(tvbuff_t *tvb _U_, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree)
+{
+    proto_item *addr_ti;
+    proto_tree *addr_tree;
+
+    addr_ti = proto_tree_add_item(shadowsocks_tree, hf_shadowsocks_addr, tvb, 0, 0, ENC_NA);
+    proto_item_set_text(addr_ti, "[Address]");
+    addr_tree = proto_item_add_subtree(addr_ti, ett_shadowsocks_addr);
+
+    /* Address type */
+    proto_tree_add_item(addr_tree, hf_shadowsocks_atyp, conv_data->next_tvb, 0, 1, ENC_BIG_ENDIAN);
+    switch (tvb_get_uint8(conv_data->next_tvb, 0))
+    {
+    case 0x01:
+        // 0x01: IPv4 address
+        proto_tree_add_item(addr_tree, hf_shadowsocks_addr_ipv4, conv_data->next_tvb, 1, 4, ENC_BIG_ENDIAN);
+        proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 5, 2, ENC_BIG_ENDIAN);
+        break;
+    case 0x03:
+        // 0x03: Domain name
+        proto_tree_add_item(addr_tree, hf_shadowsocks_addr_domain_len, conv_data->next_tvb, 1, 1, ENC_BIG_ENDIAN);
+        proto_tree_add_item(addr_tree, hf_shadowsocks_addr_domain, conv_data->next_tvb, 2, tvb_get_uint8(conv_data->next_tvb, 1), ENC_ASCII);
+        proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 2 + tvb_get_uint8(conv_data->next_tvb, 1), 2, ENC_BIG_ENDIAN);
+        break;
+    case 0x04:
+        // 0x04: IPv6 address
+        proto_tree_add_item(addr_tree, hf_shadowsocks_addr_ipv6, conv_data->next_tvb, 1, 16, ENC_BIG_ENDIAN);
+        proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 17, 2, ENC_BIG_ENDIAN);
+        break;
+    default:
+        report_failure("Unknown address type: %u", tvb_get_uint8(conv_data->next_tvb, 0));
+        break;
+    }
+}
+
+void decrypt_shadowsocks_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree _U_, proto_tree *meta_cipher_tree, uint32_t *pkt_idx)
 {
     uint8_t *cur_nonce;
     uint8_t *tvb_copy = tvb_memdup(wmem_file_scope(), tvb, 0, tvb_captured_length(tvb));
@@ -186,6 +232,8 @@ void dissect_decrypted_shadowsocks_packet(tvbuff_t *tvb, packet_info *pinfo _U_,
     /*** Add the decrypted payload to a new tab ***/
     next_tvb = tvb_new_child_real_data(tvb, decrypted_payload, *real_size, *real_size);
     add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks");
+    /* Store to conv_data */
+    conv_data->next_tvb = next_tvb;
 }
 
 /**
@@ -214,21 +262,21 @@ int dissect_shadowsocks(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_,
     conversation = find_or_create_conversation(pinfo);
     conv_data = get_shadowsocks_conv(conversation, proto_shadowsocks);
     /* Lookup and set the stage of the current packet */
-    cur_stage = (shadowsocks_server_stage_e *)g_hash_table_lookup(hash_table_stage, pkt_idx);
+    cur_stage = (shadowsocks_server_stage_e *)wmem_map_lookup(hash_table_stage, pkt_idx);
     if (!cur_stage)
     {
         shadowsocks_server_stage_e *tmp_stage = wmem_new0(wmem_file_scope(), shadowsocks_server_stage_e);
         *tmp_stage = STAGE_UNSET;
-        g_hash_table_insert(hash_table_stage, pkt_idx, tmp_stage);
+        wmem_map_insert(hash_table_stage, pkt_idx, tmp_stage);
     }
-    cur_stage = (shadowsocks_server_stage_e *)g_hash_table_lookup(hash_table_stage, pkt_idx);
+    cur_stage = (shadowsocks_server_stage_e *)wmem_map_lookup(hash_table_stage, pkt_idx);
     if (!cur_stage)
     {
         report_failure("Failed to lookup the stage of packet %u", *pkt_idx);
         return tvb_captured_length(tvb);
     }
     update_shadowsocks_stage(&conv_data->last_stage, cur_stage, tvb_captured_length(tvb));
-    g_hash_table_insert(hash_table_stage, pkt_idx, cur_stage);
+    wmem_map_insert(hash_table_stage, pkt_idx, cur_stage);
 
     /*** Column Data ***/
     /* Set the Protocol column to the constant string of Shadowsocks */
@@ -272,23 +320,24 @@ int dissect_shadowsocks(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_,
         break;
     case STAGE_ADDR:
         col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_ADDR]");
-        dissect_decrypted_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
+        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
+        dissect_shadowsocks_stage_addr(tvb, pinfo, tree, data, conv_data, shadowsocks_tree);
         break;
     case STAGE_UDP_ASSOC:
         col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_UDP_ASSOC]");
-        dissect_decrypted_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
+        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
         break;
     case STAGE_DNS:
         col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_DNS]");
-        dissect_decrypted_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
+        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
         break;
     case STAGE_CONNECTING:
         col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_CONNECTING]");
-        dissect_decrypted_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
+        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
         break;
     case STAGE_STREAM:
         col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_STREAM]");
-        dissect_decrypted_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
+        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
         break;
     default:
         col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_ERROR]");
@@ -365,12 +414,57 @@ void proto_register_shadowsocks(void)
           "ss.nonce",
           FT_BYTES,
           BASE_NONE,
-          NULL, 0x0, NULL, HFILL}}};
+          NULL, 0x0, NULL, HFILL}},
+        /* Address */
+        {&hf_shadowsocks_addr,
+         {"Address",
+          "ss.addr",
+          FT_STRING,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_shadowsocks_atyp,
+         {"Address Type",
+          "ss.atyp",
+          FT_UINT8,
+          BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_shadowsocks_addr_ipv4,
+         {"IPv4",
+          "ss.ipv4",
+          FT_IPv4,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_shadowsocks_addr_domain_len,
+         {"Domain Length",
+          "ss.domain_len",
+          FT_UINT8,
+          BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_shadowsocks_addr_domain,
+         {"Domain",
+          "ss.domain",
+          FT_STRING,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_shadowsocks_addr_ipv6,
+         {"IPv6",
+          "ss.ipv6",
+          FT_IPv6,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_shadowsocks_port,
+         {"Port",
+          "ss.port",
+          FT_UINT16,
+          BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
+    };
 
     /* Setup protocol subtree array */
     static int *ett[] = {
+        &ett_shadowsocks,
         &ett_shadowsocks_meta_cipher,
-        &ett_shadowsocks};
+        &ett_shadowsocks_addr};
 
     /* Required function calls to register the header fields and subtrees */
     proto_register_field_array(proto_shadowsocks, hf, array_length(hf));
@@ -423,8 +517,8 @@ void proto_reg_handoff_shadowsocks(void)
  */
 static void shadowsocks_init(void)
 {
-    hash_table_stage = g_hash_table_new(g_int_hash, g_int_equal);
-    hash_table_nonce = g_hash_table_new(g_int_hash, g_int_equal);
+    hash_table_stage = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
+    hash_table_nonce = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
 }
 
 /**
@@ -432,8 +526,10 @@ static void shadowsocks_init(void)
  */
 static void shadowsocks_cleanup(void)
 {
-    g_hash_table_destroy(hash_table_stage);
-    g_hash_table_destroy(hash_table_nonce);
+    // g_hash_table_destroy(hash_table_stage);
+    // g_hash_table_destroy(hash_table_nonce);
+    wmem_free(wmem_file_scope(), hash_table_stage);
+    wmem_free(wmem_file_scope(), hash_table_nonce);
 }
 
 /**
@@ -463,6 +559,8 @@ static shadowsocks_conv_t *get_shadowsocks_conv(conversation_t *conv, int proto)
     conv_data->shadowsocks_meta_cipher.salt = wmem_alloc0(wmem_file_scope(), cipher_salt_size);
     conv_data->shadowsocks_meta_cipher.subkey = wmem_alloc0(wmem_file_scope(), cipher_key_size);
     conv_data->shadowsocks_meta_cipher.nonce = wmem_alloc0(wmem_file_scope(), cipher_nonce_size);
+    /* Decrypted data */
+    conv_data->next_tvb = NULL;
 
     /* Add the conv_data to the conversation */
     conversation_add_proto_data(conv, proto, conv_data);
@@ -693,24 +791,24 @@ static void init_shadowsocks_cipher_handle(shadowsocks_meta_cipher_t *meta_ciphe
     meta_cipher->is_handle_initialized = true;
 
     // DEBUG
-    printf("Cipher type: %d\n", meta_cipher->cipher_type);
-    printf("Password: %s\n", meta_cipher->password);
-    printf("Key:\n");
-    for (uint32_t i = 0; i < cipher_key_size; i++)
-        printf("%02x", meta_cipher->derived_key[i]);
-    printf("\n");
-    printf("Salt:\n");
-    for (uint32_t i = 0; i < cipher_salt_size; i++)
-        printf("%02x", meta_cipher->salt[i]);
-    printf("\n");
-    printf("Subkey:\n");
-    for (uint32_t i = 0; i < cipher_key_size; i++)
-        printf("%02x", meta_cipher->subkey[i]);
-    printf("\n");
-    printf("Nonce:\n");
-    for (uint32_t i = 0; i < cipher_nonce_size; i++)
-        printf("%02x", meta_cipher->nonce[i]);
-    printf("\n");
+    // printf("Cipher type: %d\n", meta_cipher->cipher_type);
+    // printf("Password: %s\n", meta_cipher->password);
+    // printf("Key:\n");
+    // for (uint32_t i = 0; i < cipher_key_size; i++)
+    //     printf("%02x", meta_cipher->derived_key[i]);
+    // printf("\n");
+    // printf("Salt:\n");
+    // for (uint32_t i = 0; i < cipher_salt_size; i++)
+    //     printf("%02x", meta_cipher->salt[i]);
+    // printf("\n");
+    // printf("Subkey:\n");
+    // for (uint32_t i = 0; i < cipher_key_size; i++)
+    //     printf("%02x", meta_cipher->subkey[i]);
+    // printf("\n");
+    // printf("Nonce:\n");
+    // for (uint32_t i = 0; i < cipher_nonce_size; i++)
+    //     printf("%02x", meta_cipher->nonce[i]);
+    // printf("\n");
 }
 
 /**
@@ -737,17 +835,17 @@ static void increment(uint8_t *b, uint32_t b_len)
 static uint8_t *get_shadowsocks_nonce(uint32_t *pkt_idx, uint8_t *last_nonce)
 {
     uint8_t *nonce = wmem_new0(wmem_file_scope(), uint8_t);
-    nonce = (uint8_t *)g_hash_table_lookup(hash_table_nonce, pkt_idx);
+    nonce = (uint8_t *)wmem_map_lookup(hash_table_nonce, pkt_idx);
     if (!nonce)
     {
         uint8_t *tmp_nonce = wmem_new0(wmem_file_scope(), uint8_t);
         memcpy(tmp_nonce, last_nonce, cipher_nonce_size);
-        g_hash_table_insert(hash_table_nonce, pkt_idx, tmp_nonce);
+        wmem_map_insert(hash_table_nonce, pkt_idx, tmp_nonce);
         increment(last_nonce, cipher_nonce_size);
         increment(last_nonce, cipher_nonce_size);
     }
 
-    nonce = (uint8_t *)g_hash_table_lookup(hash_table_nonce, pkt_idx);
+    nonce = (uint8_t *)wmem_map_lookup(hash_table_nonce, pkt_idx);
     if (!nonce)
     {
         report_failure("Failed to lookup the nonce of packet %u", *pkt_idx);
@@ -801,9 +899,15 @@ static void decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *no
     increment(nonce_copy, cipher_nonce_size);
 
     *real_size = real_data_size;
-    // resize out to real_data_size
     out = wmem_realloc(wmem_file_scope(), out, real_data_size);
     memcpy(out, decrypted_data, real_data_size);
+
+    /* Free the memory */
+    wmem_free(wmem_file_scope(), tmp_buf);
+    wmem_free(wmem_file_scope(), nonce_copy);
+    wmem_free(wmem_file_scope(), size_part_copy);
+    wmem_free(wmem_file_scope(), data_part_copy);
+    wmem_free(wmem_file_scope(), decrypted_data);
 
     // DEBUG
     // printf("Real payload size: %u\n", real_data_size);
@@ -816,16 +920,14 @@ static void decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *no
 }
 
 /********** Debugging Functions **********/
-static void debug_display_hash_table(GHashTable *hash_table)
+static void debug_print_key_value(const void *key, const void *value, void *user_data _U_)
 {
-    GHashTableIter iter;
-    gpointer key, value;
+    printf("%u -> %u\n", *(uint32_t *)key, *(uint32_t *)value);
+}
 
-    g_hash_table_iter_init(&iter, hash_table);
-    while (g_hash_table_iter_next(&iter, &key, &value))
-    {
-        printf("%u -> %u\n", *(uint32_t *)key, *(uint32_t *)value);
-    }
+static void debug_display_hash_table(wmem_map_t *hash_table)
+{
+    wmem_map_foreach(hash_table, (GHFunc)debug_print_key_value, NULL);
 }
 
 /*

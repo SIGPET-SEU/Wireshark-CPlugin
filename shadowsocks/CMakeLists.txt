@@ -38,7 +38,7 @@ target_link_libraries(shadowsocks epan)
 
 install_plugin(shadowsocks epan)
 
-# file(GLOB DISSECTOR_HEADERS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" "*.h")
+file(GLOB DISSECTOR_HEADERS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" "*.h")
 CHECKAPI(
 	NAME
 	  shadowsocks

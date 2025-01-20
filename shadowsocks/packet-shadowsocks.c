@@ -42,6 +42,13 @@ static int hf_shadowsocks_derived_key;
 static int hf_shadowsocks_salt;
 static int hf_shadowsocks_subkey;
 static int hf_shadowsocks_nonce;
+static const value_string cipher_type_vals[] = {
+    {AEAD_AES_128_GCM, "AEAD_AES_128_GCM"},
+    {AEAD_AES_192_GCM, "AEAD_AES_192_GCM"},
+    {AEAD_AES_256_GCM, "AEAD_AES_256_GCM"},
+    {AEAD_CHACHA20_POLY1305, "AEAD_CHACHA20_POLY1305"},
+    {AEAD_XCHACHA20_POLY1305, "AEAD_XCHACHA20_POLY1305"},
+    {0, NULL}};
 /* Address */
 static int hf_shadowsocks_addr;
 static int hf_shadowsocks_atyp;
@@ -50,6 +57,11 @@ static int hf_shadowsocks_addr_domain_len;
 static int hf_shadowsocks_addr_domain;
 static int hf_shadowsocks_addr_ipv6;
 static int hf_shadowsocks_port;
+static const value_string atyp_vals[] = {
+    {ADDRTYPE_IPV4, "IPv4"},
+    {ADDRTYPE_HOST, "Domain Name"},
+    {ADDRTYPE_IPV6, "IPv6"},
+    {0, NULL}};
 
 /********** Expert Fields **********/
 static expert_field ei_shadowsocks_salt _U_;
@@ -98,10 +110,20 @@ void dissect_shadowsocks_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto
     }
 }
 
+/**
+ * +------+----------+----------+
+ * | ATYP | DST.ADDR | DST.PORT |
+ * +------+----------+----------+
+ * |  1   | Variable |    2     |
+ * +------+----------+----------+
+ */
 void dissect_shadowsocks_stage_addr(tvbuff_t *tvb _U_, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree)
 {
     proto_item *addr_ti;
     proto_tree *addr_tree;
+
+    uint8_t next_tvb_len = tvb_captured_length(conv_data->next_tvb);
+    uint8_t addr_type = tvb_get_uint8(conv_data->next_tvb, 0);
 
     addr_ti = proto_tree_add_item(shadowsocks_tree, hf_shadowsocks_addr, tvb, 0, 0, ENC_NA);
     proto_item_set_text(addr_ti, "[Address]");
@@ -109,27 +131,54 @@ void dissect_shadowsocks_stage_addr(tvbuff_t *tvb _U_, packet_info *pinfo _U_, p
 
     /* Address type */
     proto_tree_add_item(addr_tree, hf_shadowsocks_atyp, conv_data->next_tvb, 0, 1, ENC_BIG_ENDIAN);
-    switch (tvb_get_uint8(conv_data->next_tvb, 0))
+    if ((addr_type & ADDRTYPE_MASK) == ADDRTYPE_IPV4)
     {
-    case 0x01:
-        // 0x01: IPv4 address
-        proto_tree_add_item(addr_tree, hf_shadowsocks_addr_ipv4, conv_data->next_tvb, 1, 4, ENC_BIG_ENDIAN);
-        proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 5, 2, ENC_BIG_ENDIAN);
-        break;
-    case 0x03:
-        // 0x03: Domain name
-        proto_tree_add_item(addr_tree, hf_shadowsocks_addr_domain_len, conv_data->next_tvb, 1, 1, ENC_BIG_ENDIAN);
-        proto_tree_add_item(addr_tree, hf_shadowsocks_addr_domain, conv_data->next_tvb, 2, tvb_get_uint8(conv_data->next_tvb, 1), ENC_ASCII);
-        proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 2 + tvb_get_uint8(conv_data->next_tvb, 1), 2, ENC_BIG_ENDIAN);
-        break;
-    case 0x04:
-        // 0x04: IPv6 address
-        proto_tree_add_item(addr_tree, hf_shadowsocks_addr_ipv6, conv_data->next_tvb, 1, 16, ENC_BIG_ENDIAN);
-        proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 17, 2, ENC_BIG_ENDIAN);
-        break;
-    default:
-        report_failure("Unknown address type: %u", tvb_get_uint8(conv_data->next_tvb, 0));
-        break;
+        if (next_tvb_len >= 7)
+        {
+            proto_tree_add_item(addr_tree, hf_shadowsocks_addr_ipv4, conv_data->next_tvb, 1, 4, ENC_BIG_ENDIAN);
+            proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 5, 2, ENC_BIG_ENDIAN);
+        }
+        else
+        {
+            report_failure("Header is too short");
+        }
+    }
+    else if ((addr_type & ADDRTYPE_MASK) == ADDRTYPE_HOST)
+    {
+        if (next_tvb_len > 2)
+        {
+            uint8_t addr_len = tvb_get_uint8(conv_data->next_tvb, 1);
+            if (next_tvb_len >= 4 + addr_len)
+            {
+                proto_tree_add_item(addr_tree, hf_shadowsocks_addr_domain_len, conv_data->next_tvb, 1, 1, ENC_BIG_ENDIAN);
+                proto_tree_add_item(addr_tree, hf_shadowsocks_addr_domain, conv_data->next_tvb, 2, addr_len, ENC_ASCII);
+                proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 2 + addr_len, 2, ENC_BIG_ENDIAN);
+            }
+            else
+            {
+                report_failure("Header is too short");
+            }
+        }
+        else
+        {
+            report_failure("Header is too short");
+        }
+    }
+    else if ((addr_type & ADDRTYPE_MASK) == ADDRTYPE_IPV6)
+    {
+        if (next_tvb_len >= 19)
+        {
+            proto_tree_add_item(addr_tree, hf_shadowsocks_addr_ipv6, conv_data->next_tvb, 1, 16, ENC_BIG_ENDIAN);
+            proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 17, 2, ENC_BIG_ENDIAN);
+        }
+        else
+        {
+            report_failure("Header is too short");
+        }
+    }
+    else
+    {
+        report_failure("Unsupported address type %d, maybe wrong password or encryption method", addr_type);
     }
 }
 
@@ -301,7 +350,7 @@ void proto_register_shadowsocks(void)
         {&hf_shadowsocks_meta_cipher, // node's index
          {"Meta Cipher",              // item's label
           "shadowsocks.meta_cipher",  // abbreviated name, for use in the display filter
-          FT_BYTES,                   // item's type
+          FT_NONE,                    // item's type
           BASE_NONE,                  // display base for integers
           NULL, 0x0, NULL, HFILL}},
         {&hf_shadowsocks_cipher_type,
@@ -309,7 +358,8 @@ void proto_register_shadowsocks(void)
           "shadowsocks.cipher_type",
           FT_UINT8,
           BASE_DEC,
-          NULL, 0x0, NULL, HFILL}},
+          VALS(cipher_type_vals),
+          0x0, NULL, HFILL}},
         {&hf_shadowsocks_password,
          {"Password",
           "ss.password",
@@ -344,7 +394,7 @@ void proto_register_shadowsocks(void)
         {&hf_shadowsocks_addr,
          {"Address",
           "ss.addr",
-          FT_STRING,
+          FT_NONE,
           BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_shadowsocks_atyp,
@@ -352,7 +402,8 @@ void proto_register_shadowsocks(void)
           "ss.atyp",
           FT_UINT8,
           BASE_DEC,
-          NULL, 0x0, NULL, HFILL}},
+          VALS(atyp_vals),
+          0x0, NULL, HFILL}},
         {&hf_shadowsocks_addr_ipv4,
          {"IPv4",
           "ss.ipv4",
@@ -360,7 +411,7 @@ void proto_register_shadowsocks(void)
           BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_shadowsocks_addr_domain_len,
-         {"Domain Length",
+         {"Domain Name Length",
           "ss.domain_len",
           FT_UINT8,
           BASE_DEC,

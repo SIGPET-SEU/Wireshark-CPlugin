@@ -31,6 +31,11 @@
 /********** Constants **********/
 #define SHADOWSOCKS_PORT 8388
 #define PAYLOAD_SIZE_MASK 0x3FFF
+/* For parsing header */
+#define ADDRTYPE_MASK 0xF
+#define ADDRTYPE_IPV4 0x01
+#define ADDRTYPE_HOST 0x03
+#define ADDRTYPE_IPV6 0x04
 
 /********** Structure, Enum Definitions **********/
 typedef enum

@@ -21,6 +21,7 @@
 #include <epan/expert.h>
 #include <epan/prefs.h>
 #include <epan/conversation.h>
+#include <epan/dissectors/packet-tcp.h>
 #include <epan/wmem_scopes.h>
 #include <wsutil/report_message.h>
 #include <wsutil/wsgcrypt.h>
@@ -95,6 +96,8 @@ wmem_map_t *hash_table_nonce;
 
 void dissect_shadowsocks_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree)
 {
+    gcry_error_t err;
+
     proto_tree_add_item(shadowsocks_tree, hf_shadowsocks_salt, tvb, 0, cipher_salt_size, ENC_BIG_ENDIAN);
     if (!conv_data->shadowsocks_meta_cipher.is_salt_set)
     {
@@ -105,7 +108,12 @@ void dissect_shadowsocks_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto
     /* Initialize the cipher handle */
     if (!conv_data->shadowsocks_meta_cipher.is_handle_initialized)
     {
-        init_shadowsocks_cipher_handle(&conv_data->shadowsocks_meta_cipher);
+        err = init_shadowsocks_cipher_handle(&conv_data->shadowsocks_meta_cipher);
+        if (err)
+        {
+            report_failure("Failed to initialize the cipher handle: %s. Maybe wrong password or encryption method", gcry_strerror(err));
+            return;
+        }
         conv_data->shadowsocks_meta_cipher.is_handle_initialized = true;
     }
 }
@@ -117,7 +125,7 @@ void dissect_shadowsocks_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto
  * |  1   | Variable |    2     |
  * +------+----------+----------+
  */
-void dissect_shadowsocks_stage_addr(tvbuff_t *tvb _U_, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree)
+void dissect_shadowsocks_stage_addr(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree)
 {
     proto_item *addr_ti;
     proto_tree *addr_tree;
@@ -140,7 +148,7 @@ void dissect_shadowsocks_stage_addr(tvbuff_t *tvb _U_, packet_info *pinfo _U_, p
         }
         else
         {
-            report_failure("Header is too short");
+            report_failure("Failed to dissect packet %u: too short for IPv4 address", pinfo->num);
         }
     }
     else if ((addr_type & ADDRTYPE_MASK) == ADDRTYPE_HOST)
@@ -156,12 +164,12 @@ void dissect_shadowsocks_stage_addr(tvbuff_t *tvb _U_, packet_info *pinfo _U_, p
             }
             else
             {
-                report_failure("Header is too short");
+                report_failure("Failed to dissect packet %u: too short for domain name address", pinfo->num);
             }
         }
         else
         {
-            report_failure("Header is too short");
+            report_failure("Failed to dissect packet %u: too short for domain name address", pinfo->num);
         }
     }
     else if ((addr_type & ADDRTYPE_MASK) == ADDRTYPE_IPV6)
@@ -173,17 +181,24 @@ void dissect_shadowsocks_stage_addr(tvbuff_t *tvb _U_, packet_info *pinfo _U_, p
         }
         else
         {
-            report_failure("Header is too short");
+            report_failure("Failed to dissect packet %u: too short for IPv6 address", pinfo->num);
         }
     }
     else
     {
-        report_failure("Unsupported address type %d, maybe wrong password or encryption method", addr_type);
+        report_failure("Failed to dissect packet %u: unsupported address type %u. Maybe wrong password or encryption method", pinfo->num, addr_type);
     }
+}
+
+void dissect_shadowsocks_stage_stream(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree, void *data, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree _U_)
+{
+    tcp_dissect_pdus(conv_data->next_tvb, pinfo, tree, TRUE, tvb_captured_length(conv_data->next_tvb), get_shadowsocks_message_len, dissect_shadowsocks_message, data);
 }
 
 void decrypt_shadowsocks_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree _U_, proto_tree *meta_cipher_tree, uint32_t *pkt_idx)
 {
+    gcry_error_t err;
+
     uint8_t *cur_nonce;
     uint8_t *tvb_copy = tvb_memdup(wmem_file_scope(), tvb, 0, tvb_captured_length(tvb));
     uint8_t *decrypted_payload = wmem_alloc0(wmem_file_scope(), tvb_captured_length(tvb));
@@ -192,16 +207,26 @@ void decrypt_shadowsocks_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tre
 
     if (!conv_data->shadowsocks_meta_cipher.is_handle_initialized)
     {
-        report_failure("Failed to dissect the packet: cipher handle is not initialized");
+        report_failure("Failed to dissect packet %u: cipher handle is not initialized", *pkt_idx);
         return;
     }
 
     /*** Nonce ***/
     cur_nonce = get_shadowsocks_nonce(pkt_idx, conv_data->shadowsocks_meta_cipher.nonce);
+    if (!cur_nonce)
+    {
+        report_failure("Failed to get the nonce of packet %u", *pkt_idx);
+        return;
+    }
     proto_tree_add_bytes(meta_cipher_tree, hf_shadowsocks_nonce, tvb, 0, cipher_nonce_size, cur_nonce);
 
     /*** Decryption ***/
-    decrypt_payload(conv_data->shadowsocks_meta_cipher.cipher_hd, tvb_copy, cur_nonce, decrypted_payload, real_size);
+    err = decrypt_payload(conv_data->shadowsocks_meta_cipher.cipher_hd, tvb_copy, cur_nonce, decrypted_payload, real_size);
+    if (err)
+    {
+        report_failure("Failed to decrypt the payload: %s", gcry_strerror(err));
+        return;
+    }
 
     /*** Add the decrypted payload to a new tab ***/
     next_tvb = tvb_new_child_real_data(tvb, decrypted_payload, *real_size, *real_size);
@@ -297,21 +322,10 @@ int dissect_shadowsocks(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_,
         decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
         dissect_shadowsocks_stage_addr(tvb, pinfo, tree, data, conv_data, shadowsocks_tree);
         break;
-    case STAGE_UDP_ASSOC:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_UDP_ASSOC]");
-        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
-        break;
-    case STAGE_DNS:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_DNS]");
-        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
-        break;
-    case STAGE_CONNECTING:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_CONNECTING]");
-        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
-        break;
     case STAGE_STREAM:
         col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_STREAM]");
         decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
+        dissect_shadowsocks_stage_stream(tvb, pinfo, tree, data, conv_data, shadowsocks_tree);
         break;
     default:
         col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_ERROR]");
@@ -579,9 +593,18 @@ static void update_shadowsocks_stage(shadowsocks_server_stage_e *last_stage, sha
         if (*cur_stage == STAGE_UNSET)
         {
             // TODO: Temporary solution
-            shadowsocks_server_stage_e tmp_new_stage = (*last_stage + 1) % 6;
-            *cur_stage = tmp_new_stage;
-            *last_stage = *cur_stage;
+            if (*last_stage != STAGE_STREAM)
+            {
+                shadowsocks_server_stage_e tmp_new_stage = *last_stage + 1;
+                *cur_stage = tmp_new_stage;
+                *last_stage = *cur_stage;
+            }
+            else
+            {
+                // TODO: End of the conversation
+                *cur_stage = STAGE_STREAM;
+                *last_stage = STAGE_STREAM;
+            }
         }
     }
 }
@@ -649,6 +672,7 @@ static gcry_error_t shadowsocks_kdf(const char *password, uint32_t password_len,
     err = gcry_md_open(&h, GCRY_MD_MD5, 0);
     if (err)
     {
+        ws_error("Failed to open the hash handler: %s", gcry_strerror(err));
         return err;
     }
 
@@ -688,10 +712,12 @@ static gcry_error_t shadowsocks_kdf(const char *password, uint32_t password_len,
  * @param salt_len
  * @param out the subkey
  * @param out_len
+ * @return 0 on success, error code otherwise
  */
-static void gen_subkey(const uint8_t *secret, uint32_t secret_len, uint8_t *salt, uint32_t salt_len, uint8_t *out, uint32_t out_len)
+static gcry_error_t gen_subkey(const uint8_t *secret, uint32_t secret_len, uint8_t *salt, uint32_t salt_len, uint8_t *out, uint32_t out_len)
 {
     gcry_error_t err;
+
     const char *info = "ss-subkey";
     const uint32_t info_len = strlen(info);
     const uint32_t prk_len = HASH_SHA1_LENGTH;
@@ -705,10 +731,18 @@ static void gen_subkey(const uint8_t *secret, uint32_t secret_len, uint8_t *salt
     // }
     // ```
     err = hkdf_extract(GCRY_MD_SHA1, salt, salt_len, secret, secret_len, prk);
-    DISSECTOR_ASSERT(err == 0);
+    if (err)
+    {
+        return err;
+    }
 
     err = hkdf_expand(GCRY_MD_SHA1, prk, prk_len, info, info_len, out, out_len);
-    DISSECTOR_ASSERT(err == 0);
+    if (err)
+    {
+        return err;
+    }
+
+    return 0;
 }
 
 /**
@@ -717,7 +751,7 @@ static void gen_subkey(const uint8_t *secret, uint32_t secret_len, uint8_t *salt
  * @param meta_cipher the meta cipher structure
  * @return 0 on success, error code otherwise
  */
-static void init_shadowsocks_cipher_handle(shadowsocks_meta_cipher_t *meta_cipher)
+static gcry_error_t init_shadowsocks_cipher_handle(shadowsocks_meta_cipher_t *meta_cipher)
 {
     gcry_error_t err;
 
@@ -742,27 +776,36 @@ static void init_shadowsocks_cipher_handle(shadowsocks_meta_cipher_t *meta_ciphe
     default:
         break;
     }
-    DISSECTOR_ASSERT(err == 0);
+    if (err)
+    {
+        ws_error("Failed to create the cipher handler: %s", gcry_strerror(err));
+        return err;
+    }
 
     /* Generate subkey using the derived key and salt */
-    if (!meta_cipher->is_salt_set)
+    err = gen_subkey(meta_cipher->derived_key, cipher_key_size, meta_cipher->salt, cipher_salt_size, meta_cipher->subkey, cipher_key_size);
+    if (err)
     {
-        report_failure("Failed to initialize cipher handle: salt is not set");
-        return;
+        ws_error("Failed to generate the subkey: %s", gcry_strerror(err));
+        return err;
     }
-    gen_subkey(meta_cipher->derived_key, cipher_key_size, meta_cipher->salt, cipher_salt_size, meta_cipher->subkey, cipher_key_size);
 
     /* Set key */
     err = gcry_cipher_setkey(meta_cipher->cipher_hd, meta_cipher->subkey, cipher_key_size);
-    DISSECTOR_ASSERT(err == 0);
-    /* Set IV */
-    if (meta_cipher->nonce)
+    if (err)
     {
-        wmem_free(wmem_file_scope(), meta_cipher->nonce);
+        ws_error("Failed to set the key: %s", gcry_strerror(err));
+        return err;
     }
-    meta_cipher->nonce = wmem_alloc0(wmem_file_scope(), cipher_nonce_size);
+
+    /* Set IV */
+    wmem_realloc(wmem_file_scope(), meta_cipher->nonce, cipher_nonce_size);
     err = gcry_cipher_setiv(meta_cipher->cipher_hd, meta_cipher->nonce, cipher_nonce_size);
-    DISSECTOR_ASSERT(err == 0);
+    if (err)
+    {
+        ws_error("Failed to set the IV: %s", gcry_strerror(err));
+        return err;
+    }
 
     meta_cipher->is_handle_initialized = true;
 
@@ -785,6 +828,8 @@ static void init_shadowsocks_cipher_handle(shadowsocks_meta_cipher_t *meta_ciphe
     // for (uint32_t i = 0; i < cipher_nonce_size; i++)
     //     printf("%02x", meta_cipher->nonce[i]);
     // printf("\n");
+
+    return 0;
 }
 
 /**
@@ -807,6 +852,7 @@ static void increment(uint8_t *b, uint32_t b_len)
  * @brief Lookup the VI used to decrypt the current packet, or create a new one if not found.
  * @param pkt_idx index of current packet
  * @param last_nonce conv_data->shadowsocks_meta_cipher.nonce
+ * @return the nonce used to decrypt the current packet
  */
 static uint8_t *get_shadowsocks_nonce(uint32_t *pkt_idx, uint8_t *last_nonce)
 {
@@ -824,7 +870,7 @@ static uint8_t *get_shadowsocks_nonce(uint32_t *pkt_idx, uint8_t *last_nonce)
     nonce = (uint8_t *)wmem_map_lookup(hash_table_nonce, pkt_idx);
     if (!nonce)
     {
-        report_failure("Failed to lookup the nonce of packet %u", *pkt_idx);
+        ws_error("Failed to lookup the nonce of packet %u", *pkt_idx);
         return NULL;
     }
 
@@ -838,14 +884,15 @@ static uint8_t *get_shadowsocks_nonce(uint32_t *pkt_idx, uint8_t *last_nonce)
  * @param nonce the nonce used to decrypt the payload
  * @param out the decrypted payload
  * @param real_size the size of out
+ * @return 0 on success, error code otherwise
  */
-static void decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *nonce, uint8_t *out, uint32_t *real_size)
+static gcry_error_t decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *nonce, uint8_t *out, uint32_t *real_size)
 {
+    gcry_error_t err;
+
     uint8_t *nonce_copy = wmem_memdup(wmem_file_scope(), nonce, cipher_nonce_size);
     uint8_t *size_part_copy = wmem_memdup(wmem_file_scope(), in, 2 + cipher_tag_size);
     uint8_t *data_part_copy; // The size will be determined later
-
-    gcry_error_t err;
 
     /* Decryption result */
     uint32_t real_data_size;
@@ -854,24 +901,44 @@ static void decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *no
     /* Decrypt the size part */
     uint8_t *tmp_buf = wmem_alloc0(wmem_file_scope(), 2 + cipher_tag_size);
     err = gcry_cipher_setiv(cipher_hd, nonce_copy, cipher_nonce_size);
-    DISSECTOR_ASSERT(err == 0);
+    if (err)
+    {
+        ws_error("Failed to set the IV: %s", gcry_strerror(err));
+        return err;
+    }
+
     err = gcry_cipher_decrypt(cipher_hd, tmp_buf, 2 + cipher_tag_size, size_part_copy, 2 + cipher_tag_size);
-    DISSECTOR_ASSERT(err == 0);
+    if (err)
+    {
+        ws_error("Failed to decrypt the payload: %s", gcry_strerror(err));
+        return err;
+    }
+
     increment(nonce_copy, cipher_nonce_size);
     real_data_size = (((int)tmp_buf[0] << 8) + (int)tmp_buf[1]) & PAYLOAD_SIZE_MASK;
     if (real_data_size == 0)
     {
-        report_failure("Failed to decrypt the payload: zero chunk");
-        return;
+        ws_error("Failed to decrypt the payload: zero chunk");
+        return GPG_ERR_INV_ARG;
     }
 
     /* Decrypt the data part */
     data_part_copy = wmem_memdup(wmem_file_scope(), in + 2 + cipher_tag_size, real_data_size + cipher_tag_size);
     decrypted_data = wmem_alloc0(wmem_file_scope(), real_data_size + cipher_tag_size);
     err = gcry_cipher_setiv(cipher_hd, nonce_copy, cipher_nonce_size);
-    DISSECTOR_ASSERT(err == 0);
+    if (err)
+    {
+        ws_error("Failed to set the IV: %s", gcry_strerror(err));
+        return err;
+    }
+
     err = gcry_cipher_decrypt(cipher_hd, decrypted_data, real_data_size + cipher_tag_size, data_part_copy, real_data_size + cipher_tag_size);
-    DISSECTOR_ASSERT(err == 0);
+    if (err)
+    {
+        ws_error("Failed to decrypt the payload: %s", gcry_strerror(err));
+        return err;
+    }
+
     increment(nonce_copy, cipher_nonce_size);
 
     *real_size = real_data_size;
@@ -893,6 +960,18 @@ static void decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *no
     //     printf("%02x ", decrypted_data[i]);
     // }
     // printf("\n");
+
+    return 0;
+}
+
+static int dissect_shadowsocks_message(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
+{
+    return tvb_captured_length(tvb);
+}
+
+static unsigned get_shadowsocks_message_len(packet_info *pinfo _U_, tvbuff_t *tvb, int offset, void *data _U_)
+{
+    return tvb_captured_length(tvb) - offset;
 }
 
 /********** Debugging Functions **********/

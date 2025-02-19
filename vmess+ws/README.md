@@ -48,10 +48,10 @@ vmess协议的协议头部分在任何时候都是要进行加密的，“额外
 
 ### 传输协议承载
 
-https：http+tls                                      vmess+ws（ws是基于tcp的）          vmess+ws+tls
+vmess+ws（ws是基于tcp的）
 
-![image.png](attachment:5389bcc7-e265-4d4c-81c3-32968c8f95b8:image.png)
+![image](https://github.com/user-attachments/assets/3cd7bda6-2034-4e76-9a4b-80b9ce428e01)
 
-![image.png](attachment:910815b9-fd86-47a6-bd09-bc45ddef38e9:image.png)
+vmess+ws+tls
 
-![image.png](attachment:c1f96ee1-655c-4f8e-8370-ffd3f9fa939a:image.png)
+![image](https://github.com/user-attachments/assets/09633d15-43b8-4660-bc0c-81f9394dc271)

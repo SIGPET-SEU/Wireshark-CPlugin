@@ -3,9 +3,7 @@
 ![image.png](attachment:c8409028-f1d6-469f-b373-df1f78c18e96:image.png)
 
 <aside>
-💡
-
-将传输协议改为ws即可成为vmess+ws+tls
+💡将传输协议改为ws即可成为vmess+ws+tls
 
 </aside>
 

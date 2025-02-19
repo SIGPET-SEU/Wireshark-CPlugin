@@ -1,6 +1,7 @@
 ## vmess+tcp+tls原理
 
-![image.png](attachment:c8409028-f1d6-469f-b373-df1f78c18e96:image.png)
+![image](https://github.com/user-attachments/assets/c7a4f4f8-227b-4092-aefb-2adc8bef7056)
+
 
 <aside>
 💡将传输协议改为ws即可成为vmess+ws+tls

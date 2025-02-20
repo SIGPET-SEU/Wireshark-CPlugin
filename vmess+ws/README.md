@@ -55,3 +55,15 @@ vmess+ws（ws是基于tcp的）
 vmess+ws+tls
 
 ![image](https://github.com/user-attachments/assets/09633d15-43b8-4660-bc0c-81f9394dc271)
+
+## websocket通信原理和机制
+
+WebSocket是一种网络传输协议，可在单个TCP连接上进行全双工通信，位于OSI模型的应用层。**浏览器和服务器只需要完成一次握手，两者之间就可以建立持久性的连接，并进行双向数据传输**。
+
+WebSocket的主要特点是：
+- 使用HTTP协议进行握手：WebSocket使用HTTP协议进行握手，客户端向服务器发送一个Upgrade请求，服务器返回一个101 Switching Protocols响应，表示同意建立WebSocket连接。
+- 使用TCP协议进行传输：WebSocket使用TCP协议进行传输，客户端和服务器之间的连接是双向的，可以互相发送和接收数据。
+- 使用帧格式进行编码：WebSocket使用帧格式进行编码，每个数据包由一个或多个帧组成，每个帧包含一个头部和一个负载。头部包含了帧的类型、长度、掩码等信息，负载包含了实际的数据。
+- 支持文本和二进制数据：WebSocket支持文本和二进制数据，可以根据不同的场景选择不同的数据类型。
+
+![image.png](attachment:37ff9147-58f4-4ebf-b11c-17c7bf1a9d4a:image.png)

@@ -66,4 +66,5 @@ WebSocket的主要特点是：
 - 使用帧格式进行编码：WebSocket使用帧格式进行编码，每个数据包由一个或多个帧组成，每个帧包含一个头部和一个负载。头部包含了帧的类型、长度、掩码等信息，负载包含了实际的数据。
 - 支持文本和二进制数据：WebSocket支持文本和二进制数据，可以根据不同的场景选择不同的数据类型。
 
-![image.png](attachment:37ff9147-58f4-4ebf-b11c-17c7bf1a9d4a:image.png)
+![image](https://github.com/user-attachments/assets/edea412f-cbce-4890-b85b-285081f93360)
+

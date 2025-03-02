@@ -407,31 +407,6 @@ put_uint16_be(uint16_t value, unsigned char* buffer);
 void
 put_uint16_le(uint16_t value, unsigned char* buffer);
 
-bool gbytearray_eq(const GByteArray*, const GByteArray*);
-
-bool char_array_eq(const char*, const char*, size_t);
-
-/*
- * Search if the tvb contains the needle, start at offset, end at offset + maxlength, if maxlength
- * is -1, then search until the end of the tvb. Returns the offset of the first match if found,
- * or -1 otherwise.
- * NOTE: This function will strip the terminating nul of the needle.
- */
-gint tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle);
-
-/*
- * Search if the tvb contains the TLS signatures. If the tvb contains any of
- * the signature, then return the first offset (>=0) of all the possible match.
- * Otherwise, return -1.
- */
-gint tvb_find_TLS_signiture(tvbuff_t* tvb);
-
-/*
- * Search a string (needle) in another string (haystack), like memmem in glibc, except that we
- * return the index instead of the pointer to the match. It returns -1 if no match was found.
- */
-gint mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size);
-
 /*
  * Write the content of a string into its hex form. For example, given the string
  * "0102030aefbb", we convert each octet into a single byte into the target.

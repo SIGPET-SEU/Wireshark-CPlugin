@@ -4,7 +4,7 @@
  * By Linxiao Yu <yulinxiaoybbb@gmail.com>
  *
  * Routines for VMess protocol packet disassembly
- * By Linxiao Yu <stevelim@dgtech.com>
+ * By Linxiao Yu <yulinxiaoybbb@gmail.com>
  * Copyright 1998 Steve Limkemann
  *
  * Wireshark - Network traffic analyzer
@@ -1789,84 +1789,4 @@ void
 put_uint16_le(uint16_t value, unsigned char* buffer) {
     buffer[0] = value & 0xFF;         // Least significant byte
     buffer[1] = (value >> 8) & 0xFF;  // Most significant byte
-}
-
-bool
-gbytearray_eq(const GByteArray* arr_1, const GByteArray* arr_2) {
-    if (arr_1 == NULL && arr_2 == NULL)
-        return true;
-
-    if (arr_1 == NULL || arr_2 == NULL)
-        return false;
-
-    if (arr_1->len != arr_2->len)
-        return false;
-
-    return memcmp(arr_1->data, arr_2->data, arr_1->len) == 0;
-}
-
-bool
-char_array_eq(const char* arr_1, const char* arr_2, size_t len) {
-    if (arr_1 == NULL && arr_2 == NULL)
-        return true;
-
-    if (arr_1 == NULL || arr_2 == NULL)
-        return false;
-
-    return memcmp(arr_1, arr_2, len) == 0;
-}
-
-gint
-mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size) {
-    if (haystack == NULL || needle == NULL) {
-        g_print("Warning: Either haystack or needle is NULL\n");
-        return -1;
-    }
-
-
-    if (needle_size == 0) return 0; /* Empty needle matches the beginning of haystack */
-    if (haystack_size < needle_size) return -1; /* Haystack is smaller than needle */
-
-    guint limit = haystack_size - needle_size;
-
-    for (guint i = 0; i <= limit; i++)
-        if (memcmp(haystack + i, needle, needle_size) == 0)
-            return (gint)i; /* Warning: Convert unsigned int to int */
-    return -1;
-}
-
-gint
-tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle) {
-
-    guint limit_bufsize = tvb_reported_length_remaining(tvb, offset);
-    guint bufsize;
-    if (max_length < 0)
-        bufsize = limit_bufsize + 1; /* 1 for the terminating nul */
-    else
-        if ((guint)max_length < limit_bufsize)
-            bufsize = (guint)max_length + 1;
-        else {
-            g_print("Warning: max_length is larger than the tvb remaining size, clip to the tvb remaining size.\n");
-            bufsize = limit_bufsize + 1;
-        }
-    char* buffer = (char*)malloc(bufsize);
-    tvb_get_raw_bytes_as_string(tvb, offset, buffer, bufsize);
-    /* Strip the terminating nul for both buffer and needle */
-    return mem_search(buffer, bufsize - 1, needle, 3);
-}
-
-gint
-tvb_find_TLS_signiture(tvbuff_t* tvb) {
-    gint min_pos = -1;
-
-    for (gint i = 0; i < TLS_SIGNUM; i++) {
-        gint pos = tvb_find_bytes(tvb, 0, -1, TLS_signiture[i]);
-        if (pos >= 0)
-            if (min_pos >= 0)
-                min_pos = min_pos <= pos ? min_pos : pos;
-            else
-                min_pos = pos;
-    }
-
-    return min_pos;
 }

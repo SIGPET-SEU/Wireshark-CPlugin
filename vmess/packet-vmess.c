@@ -44,14 +44,6 @@ static dissector_handle_t vmess_handle;
 static dissector_handle_t tls_handle;
 static dissector_handle_t vmess_request_handle;
 
-static char* TLS_signiture[TLS_SIGNUM] = {
-    "\x14\x03\x03", /* Change Cipher Spec */
-    "\x15\x03\x03", /* Alert */
-    "\x16\x03\x03", /* Handshake */
-    "\x16\x03\x01", /* Handshake Legacy */
-    "\x17\x03\x03"  /* Application Data */
-};
-
 static bool vmess_desegment = true; /* VMess is run atop of TCP */
 
 /* Keylog and decryption related variables and routines */

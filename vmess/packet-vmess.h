@@ -25,7 +25,12 @@ const true_false_string tfs_set_notset_vmess = { "Set", "Not set" };
 #define VMESS_PROTO_DATA_REQRES	0
 #define VMESS_PROTO_DATA_INFO	1
 
-#define VMESS_TCP_PORT 20332 /* Not IANA registed */
+// #define VMESS_TCP_PORT 20332 /* Not IANA registed */
+/**
+ * Change single port to port range, the usage is mentioned in packet-xml.c.
+ * Although packet-http.c also records the usage, it seems to be quite complicated.
+ */
+#define VMESS_TCP_PORT_RANGE "20332, 20002"
 
 #define VMESS_AUTH_LENGTH (guint) 16
 #define VMESS_RESPONSE_HEADER_LENGTH (guint) 40

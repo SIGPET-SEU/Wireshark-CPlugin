@@ -1734,7 +1734,8 @@ proto_reg_handoff_vmess(void)
     vmess_set_debug(vmess_debug_file_name);
 #endif
     tls_handle = find_dissector("tls");
-    dissector_add_uint("tcp.port", VMESS_TCP_PORT, vmess_handle);
+    // dissector_add_uint("tcp.port", VMESS_TCP_PORT, vmess_handle);
+    dissector_add_uint_range_with_preference("tcp.port", VMESS_TCP_PORT_RANGE, vmess_handle);
 }
 
 vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id)

@@ -18,7 +18,6 @@
 
 #include <wireshark.h>
 #include <epan/packet.h>
-#include <epan/expert.h>
 #include <epan/prefs.h>
 #include <epan/conversation.h>
 #include <epan/dissectors/packet-tcp.h>
@@ -29,714 +28,409 @@
 #include "packet-shadowsocks.h"
 
 /********** Protocol Handles **********/
-static int proto_shadowsocks;
+static int proto_ss;
 
 /********** Dissector Handles **********/
-static dissector_handle_t shadowsocks_handle;
+static dissector_handle_t ss_handle;
 
 /********** Header Fields **********/
-/* Meta Cipher */
-static int hf_shadowsocks_meta_cipher;
-static int hf_shadowsocks_cipher_type;
-static int hf_shadowsocks_password;
-static int hf_shadowsocks_derived_key;
-static int hf_shadowsocks_salt;
-static int hf_shadowsocks_subkey;
-static int hf_shadowsocks_nonce;
-static const value_string cipher_type_vals[] = {
-    {AEAD_AES_128_GCM, "AEAD_AES_128_GCM"},
-    {AEAD_AES_192_GCM, "AEAD_AES_192_GCM"},
-    {AEAD_AES_256_GCM, "AEAD_AES_256_GCM"},
-    {AEAD_CHACHA20_POLY1305, "AEAD_CHACHA20_POLY1305"},
-    {AEAD_XCHACHA20_POLY1305, "AEAD_XCHACHA20_POLY1305"},
-    {0, NULL}};
-/* Address */
-static int hf_shadowsocks_addr;
-static int hf_shadowsocks_atyp;
-static int hf_shadowsocks_addr_ipv4;
-static int hf_shadowsocks_addr_domain_len;
-static int hf_shadowsocks_addr_domain;
-static int hf_shadowsocks_addr_ipv6;
-static int hf_shadowsocks_port;
-static const value_string atyp_vals[] = {
-    {ADDRTYPE_IPV4, "IPv4"},
-    {ADDRTYPE_HOST, "Domain Name"},
-    {ADDRTYPE_IPV6, "IPv6"},
-    {0, NULL}};
+/* Cipher Context */
+static int hf_cipher_ctx;
+static int hf_cipher_ctx_salt;
+static int hf_cipher_ctx_skey;
+static int hf_cipher_ctx_nonce;
+static int hf_cipher_ctx_cipher;
+static int hf_cipher_ctx_cipher_method;
+static int hf_cipher_ctx_cipher_password;
+static int hf_cipher_ctx_cipher_key;
+static int hf_cipher_ctx_cipher_nonce_len;
+static int hf_cipher_ctx_cipher_key_len;
+static int hf_cipher_ctx_cipher_tag_len;
+static const value_string hf_cipher_ctx_cipher_method_vals[] = {
+    {AEAD_CIPHER_AES128GCM, "aes-128-gcm"},
+    {AEAD_CIPHER_AES192GCM, "aes-192-gcm"},
+    {AEAD_CIPHER_AES256GCM, "aes-256-gcm"},
+    {AEAD_CIPHER_CHACHA20POLY1305IETF, "chacha20-ietf-poly1305"},
+#ifdef FS_HAVE_XCHACHA20IETF
+    {AEAD_CIPHER_XCHACHA20POLY1305IETF, "xchacha20-ietf-poly1305"},
+#endif
+    {AEAD_CIPHER_NONE, NULL},
+};
 
-/********** Expert Fields **********/
-static expert_field ei_shadowsocks_salt _U_;
-
-/********** Subtree pointers **********/
-static int ett_shadowsocks;
-static int ett_shadowsocks_meta_cipher;
-static int ett_shadowsocks_addr;
+/********** Subtree Pointers **********/
+static int ett_ss;
+static int ett_cipher_ctx;
+static int ett_cipher_ctx_cipher;
 
 /********** Preferences **********/
-/* Cipher preference */
-static cipher_type_e pref_cipher_type = AEAD_AES_256_GCM;
-static const char *pref_cipher_password = "";
-static const enum_val_t pref_cipher_type_vals[] = {
-    {"AEAD_AES_128_GCM", "aes-128-gcm", AEAD_AES_128_GCM},
-    {"AEAD_AES_192_GCM", "aes-192-gcm", AEAD_AES_192_GCM},
-    {"AEAD_AES_256_GCM", "aes-256-gcm", AEAD_AES_256_GCM},
-    {"AEAD_CHACHA20_POLY1305", "chacha20-ietf-poly1305", AEAD_CHACHA20_POLY1305},
-    {"AEAD_XCHACHA20_POLY1305", "xchacha20-ietf-poly1305", AEAD_XCHACHA20_POLY1305},
-    {NULL, NULL, 0}};
+static const char *pref_password = "";
+static int pref_cipher = AEAD_CIPHER_AES256GCM;
+static const enum_val_t pref_cipher_vals[] = {
+    {"aes-128-gcm", "AEAD_AES_128_GCM", AEAD_CIPHER_AES128GCM},
+    {"aes-192-gcm", "AEAD_AES_192_GCM", AEAD_CIPHER_AES192GCM},
+    {"aes-256-gcm", "AEAD_AES_256_GCM", AEAD_CIPHER_AES256GCM},
+    {"chacha20-ietf-poly1305", "AEAD_CHACHA20_POLY1305", AEAD_CIPHER_CHACHA20POLY1305IETF},
+#ifdef FS_HAVE_XCHACHA20IETF
+    {"xchacha20-ietf-poly1305", "AEAD_XCHACHA20_POLY1305", AEAD_CIPHER_XCHACHA20POLY1305IETF},
+#endif
+    {NULL, NULL, AEAD_CIPHER_NONE},
+};
 
 /********** Global Variables **********/
-static uint32_t cipher_key_size = AEAD_AES_256_GCM_KEY_LENGTH;
-static uint32_t cipher_salt_size = AEAD_AES_256_GCM_KEY_LENGTH;
-static uint32_t cipher_nonce_size = HPKE_AEAD_NONCE_LENGTH;
-static uint32_t cipher_tag_size = 16;
-static uint8_t cipher_derived_key[AEAD_MAX_KEY_LENGTH];
+/* Crypto */
+static const char *supported_aead_ciphers[AEAD_CIPHER_NUM] = {
+    "aes-128-gcm",
+    "aes-192-gcm",
+    "aes-256-gcm",
+    "chacha20-ietf-poly1305",
+#ifdef FS_HAVE_XCHACHA20IETF
+    "xchacha20-ietf-poly1305"
+#endif
+};
+static const int supported_aead_ciphers_nonce_size[AEAD_CIPHER_NUM] = {
+    12, 12, 12, 12,
+#ifdef FS_HAVE_XCHACHA20IETF
+    24
+#endif
+};
+static const int supported_aead_ciphers_key_size[AEAD_CIPHER_NUM] = {
+    16, 24, 32, 32,
+#ifdef FS_HAVE_XCHACHA20IETF
+    32
+#endif
+};
+static const int supported_aead_ciphers_tag_size[AEAD_CIPHER_NUM] = {
+    16, 16, 16, 16,
+#ifdef FS_HAVE_XCHACHA20IETF
+    16
+#endif
+};
 /* Hash tables (use pinfo->num as key) */
-wmem_map_t *hash_table_stage;
-wmem_map_t *hash_table_nonce;
+static wmem_map_t *stage_map;
+static wmem_map_t *nonce_map;
+// NOTE: `shadowsocks-libev` uses a bloom filter to store and check salts. Here a hash table is used instead.
+// NOTE AGAIN: Seems that it is used to avoid replay attacks only, so not necessary here?
+// static wmem_map_t *salts;
 
-void dissect_shadowsocks_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree)
+// TODO: Gather the following vars into conv_data?
+ss_crypto_t *ss_crypto;
+int ss_last_stage;
+int ss_frag;
+ss_buffer_t *ss_buf;
+ss_cipher_ctx_t *ss_cipher_ctx;
+
+int dissect_ss_stage_init(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, void *data _U_)
 {
-    gcry_error_t err;
-
-    proto_tree_add_item(shadowsocks_tree, hf_shadowsocks_salt, tvb, 0, cipher_salt_size, ENC_BIG_ENDIAN);
-    if (!conv_data->shadowsocks_meta_cipher.is_salt_set)
-    {
-        conv_data->shadowsocks_meta_cipher.salt = tvb_memdup(wmem_file_scope(), tvb, 0, cipher_salt_size);
-        conv_data->shadowsocks_meta_cipher.is_salt_set = true;
-    }
-
-    /* Initialize the cipher handle */
-    if (!conv_data->shadowsocks_meta_cipher.is_handle_initialized)
-    {
-        err = init_shadowsocks_cipher_handle(&conv_data->shadowsocks_meta_cipher);
-        if (err)
-        {
-            report_failure("Failed to initialize the cipher handle: %s. Maybe wrong password or encryption method", gcry_strerror(err));
-            return;
-        }
-        conv_data->shadowsocks_meta_cipher.is_handle_initialized = true;
-    }
-}
-
-/**
- * +------+----------+----------+
- * | ATYP | DST.ADDR | DST.PORT |
- * +------+----------+----------+
- * |  1   | Variable |    2     |
- * +------+----------+----------+
- */
-void dissect_shadowsocks_stage_addr(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree)
-{
-    proto_item *addr_ti;
-    proto_tree *addr_tree;
-
-    uint8_t next_tvb_len = tvb_captured_length(conv_data->next_tvb);
-    uint8_t addr_type = tvb_get_uint8(conv_data->next_tvb, 0);
-
-    addr_ti = proto_tree_add_item(shadowsocks_tree, hf_shadowsocks_addr, tvb, 0, 0, ENC_NA);
-    proto_item_set_text(addr_ti, "[Address]");
-    addr_tree = proto_item_add_subtree(addr_ti, ett_shadowsocks_addr);
-
-    /* Address type */
-    proto_tree_add_item(addr_tree, hf_shadowsocks_atyp, conv_data->next_tvb, 0, 1, ENC_BIG_ENDIAN);
-    if ((addr_type & ADDRTYPE_MASK) == ADDRTYPE_IPV4)
-    {
-        if (next_tvb_len >= 7)
-        {
-            proto_tree_add_item(addr_tree, hf_shadowsocks_addr_ipv4, conv_data->next_tvb, 1, 4, ENC_BIG_ENDIAN);
-            proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 5, 2, ENC_BIG_ENDIAN);
-        }
-        else
-        {
-            report_failure("Failed to dissect packet %u: too short for IPv4 address", pinfo->num);
-        }
-    }
-    else if ((addr_type & ADDRTYPE_MASK) == ADDRTYPE_HOST)
-    {
-        if (next_tvb_len > 2)
-        {
-            uint8_t addr_len = tvb_get_uint8(conv_data->next_tvb, 1);
-            if (next_tvb_len >= 4 + addr_len)
-            {
-                proto_tree_add_item(addr_tree, hf_shadowsocks_addr_domain_len, conv_data->next_tvb, 1, 1, ENC_BIG_ENDIAN);
-                proto_tree_add_item(addr_tree, hf_shadowsocks_addr_domain, conv_data->next_tvb, 2, addr_len, ENC_ASCII);
-                proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 2 + addr_len, 2, ENC_BIG_ENDIAN);
-            }
-            else
-            {
-                report_failure("Failed to dissect packet %u: too short for domain name address", pinfo->num);
-            }
-        }
-        else
-        {
-            report_failure("Failed to dissect packet %u: too short for domain name address", pinfo->num);
-        }
-    }
-    else if ((addr_type & ADDRTYPE_MASK) == ADDRTYPE_IPV6)
-    {
-        if (next_tvb_len >= 19)
-        {
-            proto_tree_add_item(addr_tree, hf_shadowsocks_addr_ipv6, conv_data->next_tvb, 1, 16, ENC_BIG_ENDIAN);
-            proto_tree_add_item(addr_tree, hf_shadowsocks_port, conv_data->next_tvb, 17, 2, ENC_BIG_ENDIAN);
-        }
-        else
-        {
-            report_failure("Failed to dissect packet %u: too short for IPv6 address", pinfo->num);
-        }
-    }
-    else
-    {
-        report_failure("Failed to dissect packet %u: unsupported address type %u. Maybe wrong password or encryption method", pinfo->num, addr_type);
-    }
-}
-
-void dissect_shadowsocks_stage_stream(tvbuff_t *tvb _U_, packet_info *pinfo, proto_tree *tree, void *data, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree _U_)
-{
-    tcp_dissect_pdus(conv_data->next_tvb, pinfo, tree, TRUE, tvb_captured_length(conv_data->next_tvb), get_shadowsocks_message_len, dissect_shadowsocks_message, data);
-}
-
-void decrypt_shadowsocks_packet(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_, shadowsocks_conv_t *conv_data, proto_tree *shadowsocks_tree _U_, proto_tree *meta_cipher_tree, uint32_t *pkt_idx)
-{
-    gcry_error_t err;
-
-    uint8_t *cur_nonce;
-    uint8_t *tvb_copy = tvb_memdup(wmem_file_scope(), tvb, 0, tvb_captured_length(tvb));
-    uint8_t *decrypted_payload = wmem_alloc0(wmem_file_scope(), tvb_captured_length(tvb));
-    uint32_t *real_size = wmem_new0(wmem_file_scope(), uint32_t);
-    tvbuff_t *next_tvb;
-
-    if (!conv_data->shadowsocks_meta_cipher.is_handle_initialized)
-    {
-        report_failure("Failed to dissect packet %u: cipher handle is not initialized", *pkt_idx);
-        return;
-    }
-
-    /*** Nonce ***/
-    cur_nonce = get_shadowsocks_nonce(pkt_idx, conv_data->shadowsocks_meta_cipher.nonce);
-    if (!cur_nonce)
-    {
-        report_failure("Failed to get the nonce of packet %u", *pkt_idx);
-        return;
-    }
-    proto_tree_add_bytes(meta_cipher_tree, hf_shadowsocks_nonce, tvb, 0, cipher_nonce_size, cur_nonce);
-
-    /*** Decryption ***/
-    err = decrypt_payload(conv_data->shadowsocks_meta_cipher.cipher_hd, tvb_copy, cur_nonce, decrypted_payload, real_size);
-    if (err)
-    {
-        report_failure("Failed to decrypt the payload: %s", gcry_strerror(err));
-        return;
-    }
-
-    /*** Add the decrypted payload to a new tab ***/
-    next_tvb = tvb_new_child_real_data(tvb, decrypted_payload, *real_size, *real_size);
-    add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks");
-    /* Store to conv_data */
-    conv_data->next_tvb = next_tvb;
-}
-
-/**
- * @brief Dissect the Shadowsocks packet.
- * @param tvb buffer containing the packet data
- * @param pinfo general packet information
- * @param tree protocol tree
- * @param data user data
- * @return the amount of data this dissector was able to dissect (which may or
- *  may not be the total captured packet as we return here)
- */
-int dissect_shadowsocks(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_)
-{
-    conversation_t *conversation;
-    shadowsocks_conv_t *conv_data;
-
-    proto_item *ti, *meta_cipher_ti, *expert_ti _U_;
-    proto_tree *shadowsocks_tree, *meta_cipher_tree;
-
-    uint32_t *pkt_idx = wmem_new0(wmem_file_scope(), uint32_t);
-    *pkt_idx = pinfo->num;
-    shadowsocks_server_stage_e *cur_stage = wmem_new0(wmem_file_scope(), shadowsocks_server_stage_e);
-
-    /*** Conversation ***/
-    /* Lookup the conversation or create a new one */
-    conversation = find_or_create_conversation(pinfo);
-    conv_data = get_shadowsocks_conv(conversation, proto_shadowsocks);
-    /* Lookup and set the stage of the current packet */
-    cur_stage = (shadowsocks_server_stage_e *)wmem_map_lookup(hash_table_stage, pkt_idx);
-    if (!cur_stage)
-    {
-        shadowsocks_server_stage_e *tmp_stage = wmem_new0(wmem_file_scope(), shadowsocks_server_stage_e);
-        *tmp_stage = STAGE_UNSET;
-        wmem_map_insert(hash_table_stage, pkt_idx, tmp_stage);
-    }
-    cur_stage = (shadowsocks_server_stage_e *)wmem_map_lookup(hash_table_stage, pkt_idx);
-    if (!cur_stage)
-    {
-        report_failure("Failed to lookup the stage of packet %u", *pkt_idx);
-        return tvb_captured_length(tvb);
-    }
-    update_shadowsocks_stage(&conv_data->last_stage, cur_stage, tvb_captured_length(tvb));
-    wmem_map_insert(hash_table_stage, pkt_idx, cur_stage);
-
-    /*** Column Data ***/
-    /* Set the Protocol column to the constant string of Shadowsocks */
-    col_set_str(pinfo->cinfo, COL_PROTOCOL, "Shadowsocks");
-    col_clear(pinfo->cinfo, COL_INFO);
-
     /*** Protocol Tree ***/
-    ti = proto_tree_add_item(tree, proto_shadowsocks, tvb, 0, -1, ENC_NA);
-    shadowsocks_tree = proto_item_add_subtree(ti, ett_shadowsocks);
-    /* Meta cipher*/
-    if (conv_data->shadowsocks_meta_cipher.is_handle_initialized)
-    {
-        meta_cipher_ti = proto_tree_add_item(shadowsocks_tree, hf_shadowsocks_meta_cipher, tvb, 0, 0, ENC_NA);
-        proto_item_set_text(meta_cipher_ti, "[Cipher Metadata]");
-        meta_cipher_tree = proto_item_add_subtree(meta_cipher_ti, ett_shadowsocks_meta_cipher);
-        proto_tree_add_uint(meta_cipher_tree, hf_shadowsocks_cipher_type, tvb, 0, 0, conv_data->shadowsocks_meta_cipher.cipher_type);
-        proto_tree_add_string(meta_cipher_tree, hf_shadowsocks_password, tvb, 0, 0, conv_data->shadowsocks_meta_cipher.password);
-        // FIXME: For `proto_tree_add_bytes`, setting `length` to 0 leads to `<MISSING>`
-        proto_tree_add_bytes(meta_cipher_tree, hf_shadowsocks_derived_key, tvb, 0, cipher_key_size, conv_data->shadowsocks_meta_cipher.derived_key);
-        if (conv_data->shadowsocks_meta_cipher.is_salt_set)
-        {
-            proto_tree_add_bytes(meta_cipher_tree, hf_shadowsocks_salt, tvb, 0, cipher_salt_size, conv_data->shadowsocks_meta_cipher.salt);
-        }
-        if (conv_data->shadowsocks_meta_cipher.is_handle_initialized)
-        {
-            proto_tree_add_bytes(meta_cipher_tree, hf_shadowsocks_subkey, tvb, 0, cipher_key_size, conv_data->shadowsocks_meta_cipher.subkey);
-        }
-    }
-
-    switch (*cur_stage)
-    {
-    case STAGE_UNSET:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_UNSET]");
-        break;
-    case STAGE_UNKNOWN:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_UNKNOWN]");
-        break;
-    case STAGE_INIT:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_INIT]");
-        dissect_shadowsocks_stage_init(tvb, pinfo, tree, data, conv_data, shadowsocks_tree);
-        break;
-    case STAGE_ADDR:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_ADDR]");
-        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
-        dissect_shadowsocks_stage_addr(tvb, pinfo, tree, data, conv_data, shadowsocks_tree);
-        break;
-    case STAGE_STREAM:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_STREAM]");
-        decrypt_shadowsocks_packet(tvb, pinfo, tree, data, conv_data, shadowsocks_tree, meta_cipher_tree, pkt_idx);
-        dissect_shadowsocks_stage_stream(tvb, pinfo, tree, data, conv_data, shadowsocks_tree);
-        break;
-    default:
-        col_set_str(pinfo->cinfo, COL_INFO, "[STAGE_ERROR]");
-        break;
-    }
+    proto_tree_add_item(tree, hf_cipher_ctx_salt, tvb, 0, -1, ENC_NA);
 
     return tvb_captured_length(tvb);
 }
 
-/**
- * @brief Register the Shadowsocks protocol with Wireshark.
- *  This function is called when Wireshark starts up.
- */
-void proto_register_shadowsocks(void)
+int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
-    module_t *shadowsocks_module _U_;
+    proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
+    proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
 
-    proto_shadowsocks = proto_register_protocol(
+    uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
+
+    // ss_buffer_t *buf = ss_buf;
+
+    int *cur_stage = NULL;
+
+    /*** Protocol Tree ***/
+    ti = proto_tree_add_item(tree, proto_ss, tvb, 0, -1, ENC_NA);
+    ss_tree = proto_item_add_subtree(ti, ett_ss);
+    /* Cipher Context */
+    cipher_ctx_ti = proto_tree_add_item(ss_tree, hf_cipher_ctx, tvb, 0, 0, ENC_NA);
+    proto_item_set_text(cipher_ctx_ti, "Cipher Context");
+    cipher_ctx_tree = proto_item_add_subtree(cipher_ctx_ti, ett_cipher_ctx);
+    if (ss_cipher_ctx->init)
+    {
+        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_salt, tvb, 0, 0, ss_cipher_ctx->salt, ss_cipher_ctx->cipher->key_len);
+        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, ss_cipher_ctx->skey, ss_cipher_ctx->cipher->key_len);
+        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, ss_cipher_ctx->nonce, ss_cipher_ctx->cipher->nonce_len);
+    }
+    /* Cipher */
+    cipher_ctx_cipher_ti = proto_tree_add_item(cipher_ctx_tree, hf_cipher_ctx_cipher, tvb, 0, 0, ENC_NA);
+    proto_item_set_text(cipher_ctx_cipher_ti, "Cipher");
+    cipher_ctx_cipher_tree = proto_item_add_subtree(cipher_ctx_cipher_ti, ett_cipher_ctx_cipher);
+    proto_tree_add_int(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_method, tvb, 0, 0, ss_cipher_ctx->cipher->method);
+    proto_tree_add_string(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_password, tvb, 0, 0, pref_password);
+    proto_tree_add_bytes_with_length(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key, tvb, 0, 0, ss_cipher_ctx->cipher->key, ss_cipher_ctx->cipher->key_len);
+    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_nonce_len, tvb, 0, 0, ss_cipher_ctx->cipher->nonce_len);
+    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key_len, tvb, 0, 0, ss_cipher_ctx->cipher->key_len);
+    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_tag_len, tvb, 0, 0, ss_cipher_ctx->cipher->tag_len);
+
+    /*** Stage ***/
+    cur_stage = (int *)wmem_map_lookup(stage_map, pinfo_num_copy);
+    /* Determine the current stage */
+    if (cur_stage == NULL)
+    {
+        cur_stage = wmem_new0(wmem_file_scope(), int);
+        if (ss_last_stage < 0)
+        { // Previous stage is unknown
+            if (tvb_captured_length(tvb) <= ss_crypto->cipher->key_len && !ss_cipher_ctx->init)
+            { // Check if it's a valid salt
+                if (tvb_captured_length(tvb) < ss_crypto->cipher->key_len)
+                { // Maybe the salt is split into multiple packets
+                    // TODO: temporarily set to STAGE_ERROR
+                    *cur_stage = STAGE_ERROR;
+                }
+                else
+                { // Assume it's a valid salt
+                    gcry_error_t err = ss_aead_cipher_ctx_set_key(ss_cipher_ctx);
+                    if (err)
+                    {
+                        ws_error("Failed to set cipher key: %s", gcry_strerror(err));
+                        *cur_stage = STAGE_ERROR;
+                    }
+                    ss_cipher_ctx->init = 1;
+                    *cur_stage = STAGE_INIT;
+                }
+            }
+            else
+            { // Can't be a valid salt
+                *cur_stage = STAGE_UNKNOWN;
+            }
+        }
+        else
+        {
+            // TODO: other stages
+            *cur_stage = STAGE_UNKNOWN;
+        }
+
+        wmem_map_insert(stage_map, pinfo_num_copy, cur_stage);
+        ss_last_stage = *cur_stage;
+    }
+
+    /*** Column Data & Dissection ***/
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "Shadowsocks");
+    col_clear(pinfo->cinfo, COL_INFO);
+    switch (*cur_stage)
+    {
+    case STAGE_UNKNOWN:
+        col_set_str(pinfo->cinfo, COL_INFO, "Stage: UNKNOWN");
+        break;
+    case STAGE_UNSET:
+        col_set_str(pinfo->cinfo, COL_INFO, "Stage: UNSET");
+        break;
+    case STAGE_ERROR:
+        col_set_str(pinfo->cinfo, COL_INFO, "Stage: ERROR");
+        break;
+    case STAGE_INIT:
+        col_set_str(pinfo->cinfo, COL_INFO, "Stage: INIT");
+        dissect_ss_stage_init(tvb, pinfo, ss_tree, NULL);
+        break;
+    case STAGE_HANDSHAKE:
+        col_set_str(pinfo->cinfo, COL_INFO, "Stage: HANDSHAKE");
+        break;
+    case STAGE_RESOLVE:
+        col_set_str(pinfo->cinfo, COL_INFO, "Stage: RESOLVE");
+        break;
+    case STAGE_STREAM:
+        col_set_str(pinfo->cinfo, COL_INFO, "Stage: STREAM");
+        break;
+    case STAGE_STOP:
+        col_set_str(pinfo->cinfo, COL_INFO, "Stage: STOP");
+        return tvb_captured_length(tvb);
+        break;
+    default:
+        ws_error("Unknown stage: %d", *cur_stage);
+        break;
+    }
+
+    // ss_buf->len = tvb_captured_length(tvb);
+    // ss_crypto->decrypt(ss_buf, ss_cipher_ctx, BUF_SIZE);
+
+    return tvb_captured_length(tvb);
+}
+
+void proto_register_ss(void)
+{
+    module_t *ss_module;
+
+    proto_ss = proto_register_protocol(
         "Shadowsocks", // name
         "Shadowsocks", // short_name
         "shadowsocks"  // filter_name
     );
 
-    shadowsocks_handle = register_dissector("shadowsocks", dissect_shadowsocks, proto_shadowsocks);
+    ss_handle = register_dissector("shadowsocks", dissect_ss, proto_ss);
 
     /*** Header Fields & Subtrees ***/
     static hf_register_info hf[] = {
-        // // Stage
-        // {&hf_shadowsocks_stage,
-        //  {"Stage",
-        //   "shadowsocks.stage",
-        //   FT_INT8,
-        //   BASE_DEC,
-        //   NULL, 0x0, NULL, HFILL}},
-        /* Meta cipher */
-        {&hf_shadowsocks_meta_cipher, // node's index
-         {"Meta Cipher",              // item's label
-          "shadowsocks.meta_cipher",  // abbreviated name, for use in the display filter
-          FT_NONE,                    // item's type
-          BASE_NONE,                  // display base for integers
-          NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_cipher_type,
-         {"Cipher Type",
-          "shadowsocks.cipher_type",
-          FT_UINT8,
-          BASE_DEC,
-          VALS(cipher_type_vals),
-          0x0, NULL, HFILL}},
-        {&hf_shadowsocks_password,
-         {"Password",
-          "ss.password",
-          FT_STRING,
-          BASE_NONE,
-          NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_derived_key,
-         {"Derived Key",
-          "ss.derived_key",
-          FT_BYTES,
-          BASE_NONE,
-          NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_salt,
-         {"Salt",
-          "shadowsocks.salt",
-          FT_BYTES,
-          BASE_NONE,
-          NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_subkey,
-         {"Subkey",
-          "ss.subkey",
-          FT_BYTES,
-          BASE_NONE,
-          NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_nonce,
-         {"Nonce",
-          "ss.nonce",
-          FT_BYTES,
-          BASE_NONE,
-          NULL, 0x0, NULL, HFILL}},
-        /* Address */
-        {&hf_shadowsocks_addr,
-         {"Address",
-          "ss.addr",
+        {&hf_cipher_ctx,
+         {"Cipher Context",
+          "shadowsocks.cipher_ctx",
           FT_NONE,
           BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_atyp,
-         {"Address Type",
-          "ss.atyp",
-          FT_UINT8,
-          BASE_DEC,
-          VALS(atyp_vals),
-          0x0, NULL, HFILL}},
-        {&hf_shadowsocks_addr_ipv4,
-         {"IPv4",
-          "ss.ipv4",
-          FT_IPv4,
+        {&hf_cipher_ctx_salt,
+         {"Salt",
+          "shadowsocks.cipher_ctx.salt",
+          FT_BYTES,
           BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_addr_domain_len,
-         {"Domain Name Length",
-          "ss.domain_len",
-          FT_UINT8,
-          BASE_DEC,
+        {&hf_cipher_ctx_skey,
+         {"Subkey",
+          "shadowsocks.cipher_ctx.skey",
+          FT_BYTES,
+          BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_addr_domain,
-         {"Domain",
-          "ss.domain",
+        {&hf_cipher_ctx_nonce,
+         {"Nonce",
+          "shadowsocks.cipher_ctx.nonce",
+          FT_BYTES,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_cipher_ctx_cipher,
+         {"Cipher",
+          "shadowsocks.cipher_ctx.cipher",
+          FT_NONE,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_cipher_ctx_cipher_method,
+         {"Method",
+          "shadowsocks.cipher_ctx.cipher.method",
+          FT_INT8,
+          BASE_DEC,
+          VALS(hf_cipher_ctx_cipher_method_vals), 0x0, NULL, HFILL}},
+        {&hf_cipher_ctx_cipher_password,
+         {"Password",
+          "shadowsocks.cipher_ctx.cipher.password",
           FT_STRING,
           BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_addr_ipv6,
-         {"IPv6",
-          "ss.ipv6",
-          FT_IPv6,
+        {&hf_cipher_ctx_cipher_key,
+         {"Key",
+          "shadowsocks.cipher_ctx.cipher.key",
+          FT_BYTES,
           BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
-        {&hf_shadowsocks_port,
-         {"Port",
-          "ss.port",
-          FT_UINT16,
+        {&hf_cipher_ctx_cipher_nonce_len,
+         {"Nonce Length",
+          "shadowsocks.cipher_ctx.cipher.nonce_len",
+          FT_UINT8,
+          BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_cipher_ctx_cipher_key_len,
+         {"Key Length",
+          "shadowsocks.cipher_ctx.cipher.key_len",
+          FT_UINT8,
+          BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_cipher_ctx_cipher_tag_len,
+         {"Tag Length",
+          "shadowsocks.cipher_ctx.cipher.tag_len",
+          FT_UINT8,
           BASE_DEC,
           NULL, 0x0, NULL, HFILL}},
     };
 
-    /* Setup protocol subtree array */
+    /* Subtree array */
     static int *ett[] = {
-        &ett_shadowsocks,
-        &ett_shadowsocks_meta_cipher,
-        &ett_shadowsocks_addr};
+        &ett_ss,
+        &ett_cipher_ctx,
+        &ett_cipher_ctx_cipher};
 
-    /* Required function calls to register the header fields and subtrees */
-    proto_register_field_array(proto_shadowsocks, hf, array_length(hf));
+    /* Register */
+    proto_register_field_array(proto_ss, hf, array_length(hf));
     proto_register_subtree_array(ett, array_length(ett));
 
     /*** Preferences ***/
-    shadowsocks_module = prefs_register_protocol(proto_shadowsocks, proto_reg_handoff_shadowsocks);
-    /* Cipher type preference */
-    prefs_register_enum_preference(shadowsocks_module,
-                                   "cipher_type",
-                                   "Cipher type",
+    ss_module = prefs_register_protocol(proto_ss, proto_reg_handoff_ss);
+    prefs_register_enum_preference(ss_module,
+                                   "cipher",
+                                   "Cipher",
                                    "The cipher used by the Shadowsocks server",
-                                   (int *)&pref_cipher_type,
-                                   pref_cipher_type_vals,
+                                   (int *)&pref_cipher,
+                                   pref_cipher_vals,
                                    false);
-    /* Password preference */
-    prefs_register_string_preference(shadowsocks_module,
+    prefs_register_string_preference(ss_module,
                                      "password",
-                                     "Shadowsocks password",
-                                     "The password of the Shadowsocks server",
-                                     &pref_cipher_password);
+                                     "Password",
+                                     "The password set by Shadowsocks server",
+                                     &pref_password);
 
-    register_init_routine(shadowsocks_init);
-    register_cleanup_routine(shadowsocks_cleanup);
+    register_init_routine(ss_init_routine);
+    register_cleanup_routine(ss_cleanup_routine);
 }
 
+void proto_reg_handoff_ss(void)
+{
+    dissector_add_uint_with_preference("tcp.port", SHADOWSOCKS_TCP_PORT, ss_handle);
+}
+
+/********** Routine **********/
+void ss_init_routine(void)
+{
+    ss_crypto = ss_crypto_init(pref_password, NULL, supported_aead_ciphers[pref_cipher]);
+    if (ss_crypto == NULL)
+    {
+        ws_error("Failed to initialize ciphers");
+        exit(-1);
+    }
+
+    ss_buf = wmem_new0(wmem_file_scope(), ss_buffer_t);
+    ss_balloc(ss_buf, BUF_SIZE);
+    ss_last_stage = STAGE_UNSET;
+    ss_frag = 0;
+    ss_cipher_ctx = wmem_new0(wmem_file_scope(), ss_cipher_ctx_t);
+    ss_crypto->ctx_init(ss_crypto->cipher, ss_cipher_ctx);
+
+    stage_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
+    nonce_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
+    // salts = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
+}
+
+void ss_cleanup_routine(void)
+{
+    if (ss_cipher_ctx != NULL)
+    {
+        ss_crypto->ctx_release(ss_cipher_ctx);
+        wmem_free(wmem_file_scope(), ss_cipher_ctx);
+    }
+
+    if (ss_buf != NULL)
+    {
+        ss_bfree(ss_buf);
+        wmem_free(wmem_file_scope(), ss_buf);
+    }
+
+    wmem_free(wmem_file_scope(), stage_map);
+    wmem_free(wmem_file_scope(), nonce_map);
+    // wmem_free(wmem_file_scope(), salts);
+}
+
+/********** Crypto **********/
 /**
- * @brief Associate the protocol handler with the traffic.
- *  Called by Wireshark's preferences manager whenever "Apply" or "OK" are pressed.
+ * @param md_algo Hash algorithm (defined in gcrypt.h)
+ * @param salt Salt
+ * @param salt_len Length of salt
+ * @param ikm Input keying material (derived from password)
+ * @param ikm_len Length of ikm
+ * @param info Optional context ("ss-subkey" in this case)
+ * @param info_len Length of info
+ * @param okm Output keying material (subkey)
+ * @param okm_len Length of okm
+ * @return 0 on success and an error code otherwise
  */
-void proto_reg_handoff_shadowsocks(void)
+gcry_error_t ss_crypto_hkdf(int md_algo,
+                            const unsigned char *salt, int salt_len,
+                            const unsigned char *ikm, int ikm_len,
+                            const unsigned char *info, int info_len,
+                            unsigned char *okm, int okm_len)
 {
     gcry_error_t err;
-    static bool is_initialized = false;
+    unsigned char prk[MAX_MD_SIZE];
 
-    if (!is_initialized)
-    {
-        dissector_add_uint_with_preference("tcp.port", SHADOWSOCKS_PORT, shadowsocks_handle);
-        is_initialized = true;
-    }
-
-    set_cipher_size(pref_cipher_type);
-    /* Derive the key from the password */
-    err = shadowsocks_kdf(pref_cipher_password, strlen(pref_cipher_password), cipher_derived_key, cipher_key_size);
-    DISSECTOR_ASSERT(err == 0);
-}
-
-/**
- * @brief Operations to be performed when the plugin is loaded.
- */
-static void shadowsocks_init(void)
-{
-    hash_table_stage = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
-    hash_table_nonce = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
-}
-
-/**
- * @brief Corresponding to `shadowsocks_init()`.
- */
-static void shadowsocks_cleanup(void)
-{
-    // g_hash_table_destroy(hash_table_stage);
-    // g_hash_table_destroy(hash_table_nonce);
-    wmem_free(wmem_file_scope(), hash_table_stage);
-    wmem_free(wmem_file_scope(), hash_table_nonce);
-}
-
-/**
- * @brief Return the Shadowsocks conversation data if it exists, or create a new one.
- * @param conv the conversation
- * @param proto the protocol handle
- * @return the retrieved or created Shadowsocks conversation data
- */
-static shadowsocks_conv_t *get_shadowsocks_conv(conversation_t *conv, int proto)
-{
-    shadowsocks_conv_t *conv_data = (shadowsocks_conv_t *)conversation_get_proto_data(conv, proto);
-    if (conv_data)
-    {
-        return conv_data;
-    }
-
-    /*** Initialization ***/
-    conv_data = wmem_new0(wmem_file_scope(), shadowsocks_conv_t);
-    conv_data->last_stage = STAGE_UNSET;
-    /* Meta cipher */
-    conv_data->shadowsocks_meta_cipher.is_handle_initialized = false;
-    conv_data->shadowsocks_meta_cipher.is_salt_set = false;
-    conv_data->shadowsocks_meta_cipher.cipher_hd = NULL;
-    conv_data->shadowsocks_meta_cipher.cipher_type = pref_cipher_type;
-    conv_data->shadowsocks_meta_cipher.password = pref_cipher_password;
-    conv_data->shadowsocks_meta_cipher.derived_key = cipher_derived_key;
-    conv_data->shadowsocks_meta_cipher.salt = wmem_alloc0(wmem_file_scope(), cipher_salt_size);
-    conv_data->shadowsocks_meta_cipher.subkey = wmem_alloc0(wmem_file_scope(), cipher_key_size);
-    conv_data->shadowsocks_meta_cipher.nonce = wmem_alloc0(wmem_file_scope(), cipher_nonce_size);
-    /* Decrypted data */
-    conv_data->next_tvb = NULL;
-
-    /* Add the conv_data to the conversation */
-    conversation_add_proto_data(conv, proto, conv_data);
-    return conv_data;
-}
-
-/**
- * @brief Similar to a FSM, set the current stage of a Shadowsocks packet.
- * @param last_stage conv_data->last_stage
- * @param cur_stage the current stage of the packet, initialized to `STAGE_UNSET`(-3)
- * @param payload_size
- */
-static void update_shadowsocks_stage(shadowsocks_server_stage_e *last_stage, shadowsocks_server_stage_e *cur_stage, uint32_t payload_size)
-{
-    if (*last_stage == STAGE_UNSET)
-    {
-        if (*cur_stage != STAGE_UNSET)
-        {
-            // It should not happen
-            *last_stage = *cur_stage;
-        }
-        else
-        {
-            /* Check if the payload is salt */
-            // NOTE: Not a reliable way
-            if (payload_size != cipher_salt_size)
-            {
-                // It means the conversation is not started from the beginning, leave it unknown
-                *cur_stage = STAGE_UNKNOWN;
-            }
-            else
-            {
-                *cur_stage = STAGE_INIT;
-                *last_stage = STAGE_INIT;
-            }
-        }
-    }
-    else
-    {
-        if (*cur_stage == STAGE_UNSET)
-        {
-            // TODO: Temporary solution
-            if (*last_stage != STAGE_STREAM)
-            {
-                shadowsocks_server_stage_e tmp_new_stage = *last_stage + 1;
-                *cur_stage = tmp_new_stage;
-                *last_stage = *cur_stage;
-            }
-            else
-            {
-                // TODO: End of the conversation
-                *cur_stage = STAGE_STREAM;
-                *last_stage = STAGE_STREAM;
-            }
-        }
-    }
-}
-
-/********** Shadowsocks Cipher Related Functions **********/
-/**
- * @brief Set key size, nonce size, salt size, and tag size according to the cipher type.
- *  Called by `proto_reg_handoff_shadowsocks()` when the cipher type is updated.
- * @param cipher_type
- */
-static void set_cipher_size(cipher_type_e cipher_type)
-{
-    switch (cipher_type)
-    {
-    case AEAD_AES_128_GCM:
-        cipher_key_size = AEAD_AES_128_GCM_KEY_LENGTH;
-        cipher_nonce_size = HPKE_AEAD_NONCE_LENGTH;
-        break;
-    case AEAD_AES_192_GCM:
-        cipher_key_size = 24;
-        cipher_nonce_size = HPKE_AEAD_NONCE_LENGTH;
-        break;
-    case AEAD_AES_256_GCM:
-        cipher_key_size = AEAD_AES_256_GCM_KEY_LENGTH;
-        cipher_nonce_size = HPKE_AEAD_NONCE_LENGTH;
-        break;
-    case AEAD_CHACHA20_POLY1305:
-        cipher_key_size = AEAD_CHACHA20POLY1305_KEY_LENGTH;
-        cipher_nonce_size = HPKE_AEAD_NONCE_LENGTH;
-        break;
-    case AEAD_XCHACHA20_POLY1305:
-        cipher_key_size = 32;
-        cipher_nonce_size = 24;
-        break;
-    default:
-        break;
-    }
-    cipher_salt_size = (cipher_key_size > 16) ? cipher_key_size : 16;
-    cipher_tag_size = 16;
-}
-
-/**
- * @brief Key-derivation function from original Shadowsocks.
- * @param password the password of the proxy server
- * @param password_len
- * @param out the derived key
- * @param out_len
- * @return 0 on success, error code otherwise
- */
-static gcry_error_t shadowsocks_kdf(const char *password, uint32_t password_len, uint8_t *out, uint32_t out_len)
-{
-    gcry_md_hd_t h;
-    gcry_error_t err;
-    const uint32_t hash_len = HASH_MD5_LENGTH;
-    uint8_t lastoutput[HASH_MD5_LENGTH];
-
-    /* Some sanity checks */
-    if (!(out_len > 0 && out_len <= 255 * hash_len) ||
-        !(hash_len > 0 && hash_len <= sizeof(lastoutput)))
-    {
-        return GPG_ERR_INV_ARG;
-    }
-
-    // NOTE: Do not set the flags to `GCRY_MD_FLAG_HMAC` to enable the HMAC feature
-    err = gcry_md_open(&h, GCRY_MD_MD5, 0);
-    if (err)
-    {
-        ws_error("Failed to open the hash handler: %s", gcry_strerror(err));
-        return err;
-    }
-
-    // NOTE: Keep the same logic as the Clash implementation:
-    // ```go
-    // for len(b) < keyLen {
-    //     h.Write(prev)
-    //     h.Write([]byte(password))
-    //     b = h.Sum(b)
-    //     prev = b[len(b)-h.Size():]
-    //     h.Reset()
-    // }
-    // ```
-    for (uint32_t offset = 0; offset < out_len; offset += hash_len)
-    {
-        gcry_md_reset(h);
-        // NOTE: Do not set the key
-        // gcry_md_setkey(h, password, password_len);
-        if (offset > 0)
-        {
-            gcry_md_write(h, lastoutput, hash_len);
-        }
-        gcry_md_write(h, password, password_len);
-        memcpy(lastoutput, gcry_md_read(h, GCRY_MD_MD5), hash_len);
-        memcpy(out + offset, lastoutput, MIN(hash_len, out_len - offset));
-    }
-
-    gcry_md_close(h);
-    return 0;
-}
-
-/**
- * @brief Generate a subkey from the secret and salt.
- * @param secret the key derived using the function `shadowsocks_kdf()`
- * @param secret_len
- * @param salt the salt sent by the client
- * @param salt_len
- * @param out the subkey
- * @param out_len
- * @return 0 on success, error code otherwise
- */
-static gcry_error_t gen_subkey(const uint8_t *secret, uint32_t secret_len, uint8_t *salt, uint32_t salt_len, uint8_t *out, uint32_t out_len)
-{
-    gcry_error_t err;
-
-    const char *info = "ss-subkey";
-    const uint32_t info_len = strlen(info);
-    const uint32_t prk_len = HASH_SHA1_LENGTH;
-    uint8_t prk[HASH_SHA1_LENGTH];
-
-    // NOTE: Keep the same logic as the Clash implementation:
-    // ```go
-    // func New(hash func() hash.Hash, secret, salt, info []byte) io.Reader {
-    //     prk := Extract(hash, secret, salt)
-    //     return Expand(hash, prk, info)
-    // }
-    // ```
-    err = hkdf_extract(GCRY_MD_SHA1, salt, salt_len, secret, secret_len, prk);
+    err = hkdf_extract(md_algo, salt, salt_len, ikm, ikm_len, prk);
     if (err)
     {
         return err;
     }
-
-    err = hkdf_expand(GCRY_MD_SHA1, prk, prk_len, info, info_len, out, out_len);
+    err = hkdf_expand(md_algo, prk, HASH_SHA1_LENGTH, info, info_len, okm, okm_len);
     if (err)
     {
         return err;
@@ -745,244 +439,342 @@ static gcry_error_t gen_subkey(const uint8_t *secret, uint32_t secret_len, uint8
     return 0;
 }
 
-/**
- * @brief Initialize the cipher handle.
- *  Make sure the password and salt are set before calling this function.
- * @param meta_cipher the meta cipher structure
- * @return 0 on success, error code otherwise
- */
-static gcry_error_t init_shadowsocks_cipher_handle(shadowsocks_meta_cipher_t *meta_cipher)
+gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx)
 {
     gcry_error_t err;
 
-    /* Create cipher handler */
-    switch (meta_cipher->cipher_type)
-    {
-    case AEAD_AES_128_GCM:
-        err = gcry_cipher_open(&meta_cipher->cipher_hd, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM, 0);
-        break;
-    case AEAD_AES_192_GCM:
-        err = gcry_cipher_open(&meta_cipher->cipher_hd, GCRY_CIPHER_AES192, GCRY_CIPHER_MODE_GCM, 0);
-        break;
-    case AEAD_AES_256_GCM:
-        err = gcry_cipher_open(&meta_cipher->cipher_hd, GCRY_CIPHER_AES256, GCRY_CIPHER_MODE_GCM, 0);
-        break;
-    case AEAD_CHACHA20_POLY1305:
-        err = gcry_cipher_open(&meta_cipher->cipher_hd, GCRY_CIPHER_CHACHA20, GCRY_CIPHER_MODE_POLY1305, 0);
-        break;
-    case AEAD_XCHACHA20_POLY1305:
-        err = gcry_cipher_open(&meta_cipher->cipher_hd, GCRY_CIPHER_CHACHA20, GCRY_CIPHER_MODE_POLY1305, 0);
-        break;
-    default:
-        break;
-    }
+    err = ss_crypto_hkdf(GCRY_MD_SHA1,
+                         cipher_ctx->salt, cipher_ctx->cipher->key_len,
+                         cipher_ctx->cipher->key, cipher_ctx->cipher->key_len,
+                         (uint8_t *)SUBKEY_INFO, strlen(SUBKEY_INFO),
+                         cipher_ctx->skey, cipher_ctx->cipher->key_len);
     if (err)
     {
-        ws_error("Failed to create the cipher handler: %s", gcry_strerror(err));
+        ws_error("Failed to generate subkey: %s", gcry_strerror(err));
         return err;
     }
 
-    /* Generate subkey using the derived key and salt */
-    err = gen_subkey(meta_cipher->derived_key, cipher_key_size, meta_cipher->salt, cipher_salt_size, meta_cipher->subkey, cipher_key_size);
+    memset(cipher_ctx->nonce, 0, cipher_ctx->cipher->nonce_len);
+
+    err = gcry_cipher_setkey(cipher_ctx->cipher->hd, cipher_ctx->skey, cipher_ctx->cipher->key_len);
     if (err)
     {
-        ws_error("Failed to generate the subkey: %s", gcry_strerror(err));
+        ws_error("Failed to set cipher key: %s", gcry_strerror(err));
         return err;
     }
-
-    /* Set key */
-    err = gcry_cipher_setkey(meta_cipher->cipher_hd, meta_cipher->subkey, cipher_key_size);
-    if (err)
-    {
-        ws_error("Failed to set the key: %s", gcry_strerror(err));
-        return err;
-    }
-
-    /* Set IV */
-    wmem_realloc(wmem_file_scope(), meta_cipher->nonce, cipher_nonce_size);
-    err = gcry_cipher_setiv(meta_cipher->cipher_hd, meta_cipher->nonce, cipher_nonce_size);
-    if (err)
-    {
-        ws_error("Failed to set the IV: %s", gcry_strerror(err));
-        return err;
-    }
-
-    meta_cipher->is_handle_initialized = true;
-
-    // DEBUG
-    // printf("Cipher type: %d\n", meta_cipher->cipher_type);
-    // printf("Password: %s\n", meta_cipher->password);
-    // printf("Key:\n");
-    // for (uint32_t i = 0; i < cipher_key_size; i++)
-    //     printf("%02x", meta_cipher->derived_key[i]);
-    // printf("\n");
-    // printf("Salt:\n");
-    // for (uint32_t i = 0; i < cipher_salt_size; i++)
-    //     printf("%02x", meta_cipher->salt[i]);
-    // printf("\n");
-    // printf("Subkey:\n");
-    // for (uint32_t i = 0; i < cipher_key_size; i++)
-    //     printf("%02x", meta_cipher->subkey[i]);
-    // printf("\n");
-    // printf("Nonce:\n");
-    // for (uint32_t i = 0; i < cipher_nonce_size; i++)
-    //     printf("%02x", meta_cipher->nonce[i]);
-    // printf("\n");
 
     return 0;
 }
 
-/**
- * @brief Increment little-endian encoded unsigned integer b. Wrap around on overflow.
- * @param b the buffer containing the integer
- * @param b_len
- */
-static void increment(uint8_t *b, uint32_t b_len)
+int ss_crypto_derive_key(const char *pass, uint8_t *key, size_t key_len)
 {
-    for (uint32_t i = 0; i < b_len; i++)
+    size_t datal;
+    datal = strlen((const char *)pass);
+
+    gcry_md_hd_t c;
+    unsigned char md_buf[MAX_MD_SIZE];
+    int addmd;
+    unsigned int i, j, mds;
+
+    mds = gcry_md_get_algo_dlen(GCRY_MD_MD5);
+
+    if (pass == NULL)
+        return key_len;
+
+    gcry_error_t err;
+    err = gcry_md_open(&c, GCRY_MD_MD5, 0);
+    if (err)
     {
-        if (++b[i])
+        ws_error("Failed to initialize the MD5 context: %s", gcry_strerror(err));
+        exit(-1);
+    }
+
+    for (j = 0, addmd = 0; j < key_len; addmd++)
+    {
+        gcry_md_reset(c);
+        if (addmd)
         {
-            break;
+            gcry_md_write(c, md_buf, mds);
+        }
+        gcry_md_write(c, (uint8_t *)pass, datal);
+        memcpy(md_buf, gcry_md_read(c, GCRY_MD_MD5), mds);
+
+        for (i = 0; i < mds; i++, j++)
+        {
+            if (j >= key_len)
+                break;
+            key[j] = md_buf[i];
         }
     }
+
+    gcry_md_close(c);
+
+    return key_len;
 }
 
-/**
- * @brief Lookup the VI used to decrypt the current packet, or create a new one if not found.
- * @param pkt_idx index of current packet
- * @param last_nonce conv_data->shadowsocks_meta_cipher.nonce
- * @return the nonce used to decrypt the current packet
- */
-static uint8_t *get_shadowsocks_nonce(uint32_t *pkt_idx, uint8_t *last_nonce)
+ss_cipher_t *ss_aead_key_init(int method, const char *pass, const char *key)
 {
-    uint8_t *nonce = wmem_new0(wmem_file_scope(), uint8_t);
-    nonce = (uint8_t *)wmem_map_lookup(hash_table_nonce, pkt_idx);
-    if (!nonce)
-    {
-        uint8_t *tmp_nonce = wmem_new0(wmem_file_scope(), uint8_t);
-        memcpy(tmp_nonce, last_nonce, cipher_nonce_size);
-        wmem_map_insert(hash_table_nonce, pkt_idx, tmp_nonce);
-        increment(last_nonce, cipher_nonce_size);
-        increment(last_nonce, cipher_nonce_size);
-    }
+    gcry_error_t err;
+    ss_cipher_t *cipher;
 
-    nonce = (uint8_t *)wmem_map_lookup(hash_table_nonce, pkt_idx);
-    if (!nonce)
+    if (method < AEAD_CIPHER_AES128GCM || method >= AEAD_CIPHER_NUM)
     {
-        ws_error("Failed to lookup the nonce of packet %u", *pkt_idx);
+        ws_error("Illegal method: %d", method);
         return NULL;
     }
 
-    return nonce;
+    cipher = wmem_new0(wmem_file_scope(), ss_cipher_t);
+
+    if (key != NULL)
+    {
+        // TODO: Implement the key parsing function
+        // cipher->key_len = crypto_parse_key(key, cipher->key,
+        //                                    supported_aead_ciphers_key_size[method]);
+        return NULL;
+    }
+    else
+    {
+        cipher->key_len = ss_crypto_derive_key(pass, cipher->key, supported_aead_ciphers_key_size[method]);
+    }
+
+    if (cipher->key_len == 0)
+    {
+        ws_error("Failed to generate key and nonce");
+        exit(-1);
+    }
+
+    cipher->nonce_len = supported_aead_ciphers_nonce_size[method];
+    cipher->tag_len = supported_aead_ciphers_tag_size[method];
+    cipher->method = method;
+
+    switch (method)
+    {
+    case AEAD_CIPHER_AES128GCM:
+        err = gcry_cipher_open(&cipher->hd, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM, 0);
+        break;
+    case AEAD_CIPHER_AES192GCM:
+        err = gcry_cipher_open(&cipher->hd, GCRY_CIPHER_AES192, GCRY_CIPHER_MODE_GCM, 0);
+        break;
+    case AEAD_CIPHER_AES256GCM:
+        err = gcry_cipher_open(&cipher->hd, GCRY_CIPHER_AES256, GCRY_CIPHER_MODE_GCM, 0);
+        break;
+    case AEAD_CIPHER_CHACHA20POLY1305IETF:
+        err = gcry_cipher_open(&cipher->hd, GCRY_CIPHER_CHACHA20, GCRY_CIPHER_MODE_POLY1305, 0);
+        break;
+#ifdef FS_HAVE_XCHACHA20IETF
+    case AEAD_CIPHER_XCHACHA20POLY1305IETF:
+        // NOTE: xchacha20-ietf-poly1305 is not supported by libgcrypt
+        //  err = gcry_cipher_open(&cipher->hd, GCRY_CIPHER_XCHACHA20, GCRY_CIPHER_MODE_POLY1305, 0);
+        err = GPG_ERR_UNKNOWN_ALGORITHM;
+        ws_error("Unsupported cipher: xchacha20-ietf-poly1305");
+        break;
+#endif
+    default:
+        err = GPG_ERR_UNKNOWN_ALGORITHM;
+        break;
+    }
+    if (err)
+    {
+        ws_error("Failed to initialize the cipher: %s", gcry_strerror(err));
+        return NULL;
+    }
+
+    return cipher;
 }
 
-/**
- * @brief Decrypt the payload of the Shadowsocks packet.
- * @param cipher_hd conv_data->shadowsocks_meta_cipher.cipher_hd
- * @param in the encrypted payload
- * @param nonce the nonce used to decrypt the payload
- * @param out the decrypted payload
- * @param real_size the size of out
- * @return 0 on success, error code otherwise
- */
-static gcry_error_t decrypt_payload(gcry_cipher_hd_t cipher_hd, uint8_t *in, uint8_t *nonce, uint8_t *out, uint32_t *real_size)
+ss_cipher_t *ss_aead_init(const char *pass, const char *key, const char *method)
 {
-    gcry_error_t err;
-
-    uint8_t *nonce_copy = wmem_memdup(wmem_file_scope(), nonce, cipher_nonce_size);
-    uint8_t *size_part_copy = wmem_memdup(wmem_file_scope(), in, 2 + cipher_tag_size);
-    uint8_t *data_part_copy; // The size will be determined later
-
-    /* Decryption result */
-    uint32_t real_data_size;
-    uint8_t *decrypted_data;
-
-    /* Decrypt the size part */
-    uint8_t *tmp_buf = wmem_alloc0(wmem_file_scope(), 2 + cipher_tag_size);
-    err = gcry_cipher_setiv(cipher_hd, nonce_copy, cipher_nonce_size);
-    if (err)
+    int m = AEAD_CIPHER_AES128GCM;
+    if (method != NULL)
     {
-        ws_error("Failed to set the IV: %s", gcry_strerror(err));
-        return err;
+        /* check method validity */
+        for (m = AEAD_CIPHER_AES128GCM; m < AEAD_CIPHER_NUM; m++)
+        {
+            if (strcmp(method, supported_aead_ciphers[m]) == 0)
+            {
+                break;
+            }
+        }
+        if (m >= AEAD_CIPHER_NUM)
+        {
+            ws_error("Invalid cipher name: %s, use chacha20-ietf-poly1305 instead", method);
+            m = AEAD_CIPHER_CHACHA20POLY1305IETF;
+        }
     }
-
-    err = gcry_cipher_decrypt(cipher_hd, tmp_buf, 2 + cipher_tag_size, size_part_copy, 2 + cipher_tag_size);
-    if (err)
-    {
-        ws_error("Failed to decrypt the payload: %s", gcry_strerror(err));
-        return err;
-    }
-
-    increment(nonce_copy, cipher_nonce_size);
-    real_data_size = (((int)tmp_buf[0] << 8) + (int)tmp_buf[1]) & PAYLOAD_SIZE_MASK;
-    if (real_data_size == 0)
-    {
-        ws_error("Failed to decrypt the payload: zero chunk");
-        return GPG_ERR_INV_ARG;
-    }
-
-    /* Decrypt the data part */
-    data_part_copy = wmem_memdup(wmem_file_scope(), in + 2 + cipher_tag_size, real_data_size + cipher_tag_size);
-    decrypted_data = wmem_alloc0(wmem_file_scope(), real_data_size + cipher_tag_size);
-    err = gcry_cipher_setiv(cipher_hd, nonce_copy, cipher_nonce_size);
-    if (err)
-    {
-        ws_error("Failed to set the IV: %s", gcry_strerror(err));
-        return err;
-    }
-
-    err = gcry_cipher_decrypt(cipher_hd, decrypted_data, real_data_size + cipher_tag_size, data_part_copy, real_data_size + cipher_tag_size);
-    if (err)
-    {
-        ws_error("Failed to decrypt the payload: %s", gcry_strerror(err));
-        return err;
-    }
-
-    increment(nonce_copy, cipher_nonce_size);
-
-    *real_size = real_data_size;
-    out = wmem_realloc(wmem_file_scope(), out, real_data_size);
-    memcpy(out, decrypted_data, real_data_size);
-
-    /* Free the memory */
-    wmem_free(wmem_file_scope(), tmp_buf);
-    wmem_free(wmem_file_scope(), nonce_copy);
-    wmem_free(wmem_file_scope(), size_part_copy);
-    wmem_free(wmem_file_scope(), data_part_copy);
-    wmem_free(wmem_file_scope(), decrypted_data);
-
-    // DEBUG
-    // printf("Real payload size: %u\n", real_data_size);
-    // printf("Decrypted data: ");
-    // for (uint32_t i = 0; i < real_data_size; i++)
-    // {
-    //     printf("%02x ", decrypted_data[i]);
-    // }
-    // printf("\n");
-
-    return 0;
+    return ss_aead_key_init(m, pass, key);
 }
 
-static int dissect_shadowsocks_message(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
+ss_crypto_t *ss_crypto_init(const char *password, const char *key, const char *method)
 {
-    return tvb_captured_length(tvb);
+    int i, m = -1;
+
+    if (method != NULL)
+    {
+        // NOTE: Stream ciphers are deprecated
+        for (i = 0; i < AEAD_CIPHER_NUM; i++)
+            if (strcmp(method, supported_aead_ciphers[i]) == 0)
+            {
+                m = i;
+                break;
+            }
+        if (m != -1)
+        {
+            ss_cipher_t *cipher = ss_aead_init(password, key, method);
+            if (cipher == NULL)
+            {
+                return NULL;
+            }
+            ss_crypto_t *crypto = wmem_new0(wmem_file_scope(), ss_crypto_t);
+            ss_crypto_t tmp = {
+                .cipher = cipher,
+                // .decrypt_all = &aead_decrypt_all,
+                // .decrypt = &aead_decrypt,
+                .ctx_init = &ss_aead_ctx_init,
+                .ctx_release = &ss_aead_ctx_release,
+            };
+            memcpy(crypto, &tmp, sizeof(ss_crypto_t));
+            return crypto;
+        }
+    }
+
+    ws_error("Invalid cipher name: %s", method);
+    return NULL;
 }
 
-static unsigned get_shadowsocks_message_len(packet_info *pinfo _U_, tvbuff_t *tvb, int offset, void *data _U_)
+void ss_aead_ctx_init(ss_cipher_t *cipher, ss_cipher_ctx_t *cipher_ctx)
 {
-    return tvb_captured_length(tvb) - offset;
+    memset(cipher_ctx, 0, sizeof(ss_cipher_ctx_t));
+    cipher_ctx->cipher = cipher;
 }
 
-/********** Debugging Functions **********/
-static void debug_print_key_value(const void *key, const void *value, void *user_data _U_)
+void ss_aead_ctx_release(ss_cipher_ctx_t *cipher_ctx)
+{
+    if (cipher_ctx->chunk != NULL)
+    {
+        ss_bfree(cipher_ctx->chunk);
+        wmem_free(wmem_file_scope(), cipher_ctx->chunk);
+        cipher_ctx->chunk = NULL;
+    }
+
+    if (cipher_ctx->cipher->method >= AEAD_CIPHER_CHACHA20POLY1305IETF)
+        return;
+}
+
+/********** Buffer Operations **********/
+int ss_balloc(ss_buffer_t *ptr, size_t capacity)
+{
+    memset(ptr, 0, sizeof(ss_buffer_t));
+    ptr->data = (char *)wmem_alloc0(wmem_file_scope(), capacity);
+    ptr->capacity = capacity;
+    return capacity;
+}
+
+int ss_brealloc(ss_buffer_t *ptr, size_t len, size_t capacity)
+{
+    if (ptr == NULL)
+        return -1;
+    size_t real_capacity = max(len, capacity);
+    if (ptr->capacity < real_capacity)
+    {
+        ptr->data = (char *)wmem_realloc(wmem_file_scope(), ptr->data, real_capacity);
+        ptr->capacity = real_capacity;
+    }
+    return real_capacity;
+}
+
+void ss_bfree(ss_buffer_t *ptr)
+{
+    if (ptr == NULL)
+        return;
+    ptr->idx = 0;
+    ptr->len = 0;
+    ptr->capacity = 0;
+    if (ptr->data != NULL)
+    {
+        wmem_free(wmem_file_scope(), ptr->data);
+        ptr->data = NULL;
+    }
+}
+
+int ss_bprepend(ss_buffer_t *dst, ss_buffer_t *src, size_t capacity)
+{
+    ss_brealloc(dst, dst->len + src->len, capacity);
+    memmove(dst->data + src->len, dst->data, dst->len);
+    memcpy(dst->data, src->data, src->len);
+    dst->len = dst->len + src->len;
+    return dst->len;
+}
+
+/********** Utils **********/
+uint16_t load16_be(const void *s)
+{
+    const uint8_t *in = (const uint8_t *)s;
+    return ((uint16_t)in[0] << 8) | ((uint16_t)in[1]);
+}
+
+void sodium_increment(unsigned char *n, const size_t nlen)
+{
+    size_t i = 0U;
+    uint_fast16_t c = 1U;
+
+#ifdef HAVE_AMD64_ASM
+    uint64_t t64, t64_2;
+    uint32_t t32;
+
+    if (nlen == 12U)
+    {
+        __asm__ __volatile__(
+            "xorq %[t64], %[t64] \n"
+            "xorl %[t32], %[t32] \n"
+            "stc \n"
+            "adcq %[t64], (%[out]) \n"
+            "adcl %[t32], 8(%[out]) \n"
+            : [t64] "=&r"(t64), [t32] "=&r"(t32)
+            : [out] "D"(n)
+            : "memory", "flags", "cc");
+        return;
+    }
+    else if (nlen == 24U)
+    {
+        __asm__ __volatile__(
+            "movq $1, %[t64] \n"
+            "xorq %[t64_2], %[t64_2] \n"
+            "addq %[t64], (%[out]) \n"
+            "adcq %[t64_2], 8(%[out]) \n"
+            "adcq %[t64_2], 16(%[out]) \n"
+            : [t64] "=&r"(t64), [t64_2] "=&r"(t64_2)
+            : [out] "D"(n)
+            : "memory", "flags", "cc");
+        return;
+    }
+    else if (nlen == 8U)
+    {
+        __asm__ __volatile__("incq (%[out]) \n"
+                             :
+                             : [out] "D"(n)
+                             : "memory", "flags", "cc");
+        return;
+    }
+#endif
+    for (; i < nlen; i++)
+    {
+        c += (uint_fast16_t)n[i];
+        n[i] = (unsigned char)c;
+        c >>= 8;
+    }
+}
+
+/********** Debugging **********/
+void debug_print_key_value(const void *key, const void *value, void *user_data _U_)
 {
     printf("%u -> %u\n", *(uint32_t *)key, *(uint32_t *)value);
 }
 
-static void debug_display_hash_table(wmem_map_t *hash_table)
+void debug_print_hash_table(wmem_map_t *hash_table, const char *var_name)
 {
+    printf("[DEBUG] %s:\n", var_name);
     wmem_map_foreach(hash_table, (GHFunc)debug_print_key_value, NULL);
+    printf("\n");
 }
 
 /*

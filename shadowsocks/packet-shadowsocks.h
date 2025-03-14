@@ -46,23 +46,23 @@
 #define ADDRTYPE_MASK 0xF
 #define CHUNK_SIZE_LEN 2
 #define CHUNK_SIZE_MASK 0x3FFF
-/* Stages */
-#define STAGE_UNKNOWN -3
-#define STAGE_UNSET -2
-// NOTE: The 2 stages above are defined by myself
-#define STAGE_ERROR -1    /* Error detected                   */
-#define STAGE_INIT 0      /* Initial stage                    */
-#define STAGE_HANDSHAKE 1 /* Handshake with client            */
-#define STAGE_RESOLVE 4   /* Resolve the hostname             */
-#define STAGE_STREAM 5    /* Stream between client and server */
-#define STAGE_STOP 6      /* Server stop to response          */
+/* Packet Type */
+#define PKT_TYPE_UNKNOWN -2
+#define PKT_TYPE_ERROR -1
+#define PKT_TYPE_UNSET 0
+#define PKT_TYPE_SALT 1
+#define PKT_TYPE_RELAY_HEADER 2
+#define PKT_TYPE_STREAM_DATA 3
+#define PKT_TYPE_SALT_NEED_MORE 11
+#define PKT_TYPE_RELAY_HEADER_NEED_MORE 12
+#define PKT_TYPE_STREAM_DATA_NEED_MORE 13
 /* Content */
 #define MAX_HOSTNAME_LEN 256 // FQCN <= 255 characters
 #define MAX_PORT_STR_LEN 6   // PORT < 65536
 #define INET_SIZE 4
 #define INET6_SIZE 16
 /* Return Codes */
-#define RET_WRONG_STAGE -3
+#define RET_WRONG_PKT_TYPE -3
 #define RET_CRYPTO_ERROR -2
 #define RET_CRYPTO_NEED_MORE -1
 #define RET_OK 0
@@ -137,5 +137,8 @@ void ss_aead_ctx_release(ss_cipher_ctx_t *cipher_ctx);
 /********** Utils **********/
 uint16_t load16_be(const void *s);
 void sodium_increment(unsigned char *n, const size_t nlen);
+int validate_hostname(const char *hostname, const int hostname_len);
+int get_prev_pkt_type(wmem_list_frame_t *frame);
 /* Debugging */
 void debug_print_hash_table(wmem_map_t *hash_table, const char *var_name);
+void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_name);

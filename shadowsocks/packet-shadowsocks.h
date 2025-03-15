@@ -125,9 +125,15 @@ typedef struct ss_conv_data
 
 typedef void (*PrintFunc)(const void *key, const void *value, void *user_data);
 
-
 /********** Function Prototypes **********/
-/* Register */
+/* Dissectors */
+int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num);
+void dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, void *data _U_);
+void dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
+void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_);
+int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_);
+unsigned get_ss_pdu_len(packet_info *pinfo _U_, tvbuff_t *tvb, int offset _U_, void *data _U_);
+/* Registers */
 void proto_reg_handoff_ss(void);
 void proto_register_ss(void);
 /* Routines */
@@ -150,8 +156,9 @@ int ss_bprepend(ss_buffer_t *dst, ss_buffer_t *src, size_t capacity);
 uint16_t load16_be(const void *s);
 void sodium_increment(unsigned char *n, const size_t nlen);
 int validate_hostname(const char *hostname, const int hostname_len);
+int cmp_list_frame_uint_data(const void *a, const void *b);
 int get_prev_pkt_type(wmem_list_frame_t *frame);
-void get_cur_nonce(wmem_list_frame_t *frame, uint8_t *cur_nonce);
+void get_nonce(uint32_t pinfo_num, uint8_t *cur_nonce);
 /* Debugging */
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data _U_);
 void debug_print_uint_key_uint_value(const void *key, const void *value, void *user_data _U_);

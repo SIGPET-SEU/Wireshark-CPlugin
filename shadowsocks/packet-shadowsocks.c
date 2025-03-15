@@ -127,7 +127,6 @@ static const int supported_aead_ciphers_tag_size[AEAD_CIPHER_NUM] = {
 /* Hash Tables (use pinfo->num as key) */
 static wmem_map_t *pkt_type_map;
 static wmem_map_t *nonce_map;
-static wmem_map_t *next_tvb_map;
 // NOTE: `shadowsocks-libev` uses a bloom filter to store and check salts. Here a hash table is used instead.
 // NOTE AGAIN: Seems that it is used to avoid replay attacks only, so not necessary here?
 // static wmem_map_t *salts;
@@ -140,7 +139,6 @@ ss_cipher_ctx_t *ss_cipher_ctx;
 ss_crypto_t *ss_crypto;
 ss_buffer_t *ss_buf;
 uint8_t *ss_last_nonce;
-int ss_last_pkt_type;
 int ss_frag = 0;
 
 /**
@@ -206,7 +204,7 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, voi
  *  DST.PORT: desired destination port in network octet order
  * @return packet type
  */
-int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
+int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
     int ret = RET_OK;
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
@@ -220,7 +218,11 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *t
     if (cur_nonce == NULL)
     {
         cur_nonce = wmem_alloc0(wmem_file_scope(), ss_cipher_ctx->cipher->nonce_len);
-        memcpy(cur_nonce, ss_last_nonce, ss_cipher_ctx->cipher->nonce_len);
+        wmem_list_frame_t *cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
+        if (cur_list_frame == NULL)
+            wmem_list_append(pkt_order_list, pinfo_num_copy); // Add the current packet to the list
+        cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
+        get_cur_nonce(cur_list_frame, cur_nonce);
     }
 
     /*** Decryption ***/
@@ -240,7 +242,6 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *t
     /*** New Tab ***/
     next_tvb = tvb_new_child_real_data(tvb, plaintext.data, *plen, *plen);
     add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Relay Header");
-    wmem_map_insert(next_tvb_map, pinfo_num_copy, next_tvb);
 
     /*** Dissect the Decrypted Data ***/
     int offset = 0;
@@ -313,6 +314,8 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *t
         }
     }
 
+    wmem_map_insert(nonce_map, pinfo_num_copy, cur_nonce);
+
     if (offset == 1)
     { // It indicates that the atyp is not 1/3/4
         ws_critical("Invalid ATYP value: %d", atyp);
@@ -339,6 +342,48 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *t
     }
 
     return PKT_TYPE_RELAY_HEADER;
+}
+
+int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_)
+{
+    int ret = RET_OK;
+    uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
+    tvbuff_t *next_tvb;
+    uint8_t *cur_nonce;
+    ss_buffer_t plaintext = {0, 0, 0, NULL};
+    size_t *plen = wmem_new0(wmem_file_scope(), size_t);
+
+    /*** Nonce ***/
+    cur_nonce = (uint8_t *)wmem_map_lookup(nonce_map, pinfo_num_copy);
+    if (cur_nonce == NULL)
+    {
+        cur_nonce = wmem_alloc0(wmem_file_scope(), ss_cipher_ctx->cipher->nonce_len);
+        wmem_list_frame_t *cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
+        if (cur_list_frame == NULL)
+            wmem_list_append(pkt_order_list, pinfo_num_copy); // Add the current packet to the list
+        cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
+        get_cur_nonce(cur_list_frame, cur_nonce);
+    }
+
+    /*** Decryption ***/
+    ss_brealloc(&plaintext, tvb_captured_length(tvb), BUF_SIZE);
+    ret = ss_aead_decrypt(ss_cipher_ctx,
+                          (uint8_t *)plaintext.data,
+                          (uint8_t *)tvb_get_ptr(tvb, 0, tvb_captured_length(tvb)),
+                          cur_nonce,
+                          plen,
+                          (size_t)tvb_captured_length(tvb) // TODO: Consider the case where packets are reassembled
+    );
+    if (ret == RET_CRYPTO_ERROR)
+        return PKT_TYPE_STREAM_DATA;
+    if (ret == RET_CRYPTO_NEED_MORE)
+        return PKT_TYPE_STREAM_DATA_NEED_MORE;
+
+    /*** New Tab ***/
+    next_tvb = tvb_new_child_real_data(tvb, plaintext.data, *plen, *plen);
+    add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Relay Header");
+
+    return PKT_TYPE_STREAM_DATA;
 }
 
 /**
@@ -410,10 +455,14 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     ss_conv_data_t *conv_data _U_;
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     int prev_pkt_type, *cur_pkt_type;
-    wmem_list_frame_t *cur_list_frame;
     // ss_buffer_t *buf = ss_buf;
     proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
     proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
+
+    // DEBUG
+    debug_print_list(pkt_order_list, "pkt_order_list");
+    debug_print_hash_map(pkt_type_map, "pkt_type_map", debug_print_uint_key_int_value);
+    debug_print_hash_map(nonce_map, "nonce_map", debug_print_uint_key_uint8_array_value);
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -451,7 +500,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         cur_pkt_type = wmem_new0(wmem_file_scope(), int);
         *cur_pkt_type = PKT_TYPE_UNSET;
         /* Get previous packet type */
-        cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
+        wmem_list_frame_t *cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
         if (cur_list_frame == NULL)
             wmem_list_append(pkt_order_list, pinfo_num_copy); // Add the current packet to the list
         cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
@@ -484,7 +533,6 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
             }
         }
         wmem_map_insert(pkt_type_map, pinfo_num_copy, cur_pkt_type);
-        ss_last_pkt_type = *cur_pkt_type;
     }
     else
     {
@@ -497,7 +545,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
             *cur_pkt_type = dissect_ss_relay_header(tvb, pinfo, ss_tree, NULL);
             break;
         case PKT_TYPE_STREAM_DATA:
-            *cur_pkt_type = dissect_ss_message(tvb, pinfo, ss_tree, NULL);
+            *cur_pkt_type = dissect_ss_stream_data(tvb, pinfo, ss_tree, NULL);
             break;
         default:
             break;
@@ -735,13 +783,11 @@ void ss_init_routine(void)
     ss_buf = wmem_new0(wmem_file_scope(), ss_buffer_t);
     ss_balloc(ss_buf, BUF_SIZE);
 
-    ss_last_pkt_type = PKT_TYPE_UNSET;
     ss_last_nonce = wmem_alloc0(wmem_file_scope(), ss_crypto->cipher->nonce_len);
     ss_frag = 0;
 
     pkt_type_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
     nonce_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
-    next_tvb_map = wmem_map_new(wmem_file_scope(), g_str_hash, g_str_equal);
     // salts = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
     pkt_order_list = wmem_list_new(wmem_file_scope());
 }
@@ -762,7 +808,6 @@ void ss_cleanup_routine(void)
 
     wmem_free(wmem_file_scope(), pkt_type_map);
     wmem_free(wmem_file_scope(), nonce_map);
-    wmem_free(wmem_file_scope(), next_tvb_map);
     // wmem_free(wmem_file_scope(), salts);
     wmem_free(wmem_file_scope(), pkt_order_list);
 }
@@ -1291,7 +1336,7 @@ int get_prev_pkt_type(wmem_list_frame_t *frame)
     prev_frame = wmem_list_frame_prev(frame);
     if (prev_frame == NULL)
     { // Head
-        // NOTE: Return PKT_TYPE_UNSET to indicate no previous packet
+        // NOTE: Return PKT_TYPE_UNSET to indicate no previous packet.
         return PKT_TYPE_UNSET;
     }
     prev_pkt_num = (uint32_t *)wmem_list_frame_data(prev_frame);
@@ -1310,17 +1355,88 @@ int get_prev_pkt_type(wmem_list_frame_t *frame)
     return *prev_pkt_type;
 }
 
-/********** Debugging **********/
-void debug_print_key_value(const void *key, const void *value, void *user_data _U_)
+/**
+ * @brief Look up the nonce of the previous packet.
+ *  Consider the case where the previous packet is fragmented.
+ */
+void get_cur_nonce(wmem_list_frame_t *frame, uint8_t *cur_nonce)
 {
-    printf("%u -> %u\n", *(uint32_t *)key, *(uint32_t *)value);
+    wmem_list_frame_t *prev_frame;
+    uint32_t *prev_pkt_num;
+    uint8_t *prev_nonce;
+
+    if (cur_nonce == NULL)
+        wmem_alloc0(wmem_file_scope(), ss_cipher_ctx->cipher->nonce_len);
+
+    if (wmem_list_count(pkt_order_list) == 0)
+    {
+        ws_error("`pkt_order_list` is empty");
+        exit(-1);
+    }
+
+    /* Search backward until a nonce is found or reach the head of the list. */
+    prev_frame = wmem_list_frame_prev(frame);
+    while (prev_frame != NULL)
+    {
+        prev_pkt_num = (uint32_t *)wmem_list_frame_data(prev_frame);
+        if (prev_pkt_num == NULL)
+        {
+            ws_error("`prev_pkt_num` is NULL");
+            exit(-1);
+        }
+        prev_nonce = (uint8_t *)wmem_map_lookup(nonce_map, prev_pkt_num);
+        /* If last nonce is found, return the incremented value. */
+        if (prev_nonce != NULL)
+        {
+            memcpy(cur_nonce, prev_nonce, ss_cipher_ctx->cipher->nonce_len);
+            sodium_increment(cur_nonce, ss_cipher_ctx->cipher->nonce_len);
+            sodium_increment(cur_nonce, ss_cipher_ctx->cipher->nonce_len);
+            return;
+        }
+        prev_frame = wmem_list_frame_prev(prev_frame);
+    }
+
+    /* If no nonce is found, return the initial value. */
+    memset(cur_nonce, 0, ss_cipher_ctx->cipher->nonce_len);
 }
 
-void debug_print_hash_table(wmem_map_t *hash_table, const char *var_name)
+/********** Debugging **********/
+void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data _U_)
+{
+    printf("  - %u: %d\n", *(uint32_t *)key, *(int *)value);
+}
+
+void debug_print_uint_key_uint_value(const void *key, const void *value, void *user_data _U_)
+{
+    printf("  - %u: %u\n", *(uint32_t *)key, *(uint32_t *)value);
+}
+
+void debug_print_uint_key_uint8_array_value(const void *key, const void *value, void *user_data _U_)
+{
+    printf("  - %u: ", *(uint32_t *)key);
+    for (size_t i = 0; i < 16; i++)
+    {
+        printf("%02x", ((uint8_t *)value)[i]);
+    }
+    printf("\n");
+}
+
+void debug_print_hash_map(wmem_map_t *hash_map, const char *var_name, PrintFunc print_func)
 {
     printf("[DEBUG] %s:\n", var_name);
-    wmem_map_foreach(hash_table, (GHFunc)debug_print_key_value, NULL);
+    wmem_map_foreach(hash_map, (GHFunc)print_func, NULL);
     printf("\n");
+}
+
+void debug_print_list(wmem_list_t *list, const char *var_name)
+{
+    printf("[DEBUG] %s: HEAD - ", var_name);
+    wmem_list_frame_t *frame;
+    for (frame = wmem_list_head(list); frame != NULL; frame = wmem_list_frame_next(frame))
+    {
+        printf("%u - ", *(uint32_t *)wmem_list_frame_data(frame));
+    }
+    printf("TAIL\n");
 }
 
 void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_name)

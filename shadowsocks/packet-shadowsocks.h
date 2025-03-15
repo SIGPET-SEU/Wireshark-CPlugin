@@ -123,6 +123,9 @@ typedef struct ss_conv_data
     // TODO: Add fields
 } ss_conv_data_t;
 
+typedef void (*PrintFunc)(const void *key, const void *value, void *user_data);
+
+
 /********** Function Prototypes **********/
 /* Register */
 void proto_reg_handoff_ss(void);
@@ -148,7 +151,12 @@ uint16_t load16_be(const void *s);
 void sodium_increment(unsigned char *n, const size_t nlen);
 int validate_hostname(const char *hostname, const int hostname_len);
 int get_prev_pkt_type(wmem_list_frame_t *frame);
+void get_cur_nonce(wmem_list_frame_t *frame, uint8_t *cur_nonce);
 /* Debugging */
-void debug_print_hash_table(wmem_map_t *hash_table, const char *var_name);
+void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data _U_);
+void debug_print_uint_key_uint_value(const void *key, const void *value, void *user_data _U_);
+void debug_print_uint_key_uint8_array_value(const void *key, const void *value, void *user_data _U_);
+void debug_print_hash_map(wmem_map_t *hash_map, const char *var_name, PrintFunc print_func);
+void debug_print_list(wmem_list_t *list, const char *var_name);
 void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_name);
 void debug_print_tvb(tvbuff_t *tvb, const char *var_name);

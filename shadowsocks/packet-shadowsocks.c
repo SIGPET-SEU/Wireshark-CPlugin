@@ -188,81 +188,6 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, voi
 }
 
 /**
- * @brief Decrypt the content of the packet.
- * @param ctx cipher context
- * @param p plaintext (output)
- * @param c ciphertext
- * @param n nonce
- * @param plen plaintext length (output)
- * @param clen ciphertext length
- * @return 0 on success and an error code otherwise
- */
-int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t *p, uint8_t *c, uint8_t *n, size_t *plen, size_t clen)
-{
-    gcry_error_t err = GPG_ERR_NO_ERROR;
-    size_t nlen = ctx->cipher->nonce_len;
-    size_t tlen = ctx->cipher->tag_len;
-    uint8_t *len_buf = wmem_alloc0(wmem_file_scope(), 2 + tlen);
-    size_t chunk_len;
-    uint8_t *n_copy = wmem_memdup(wmem_file_scope(), n, nlen);
-
-    if (clen <= 2 * tlen + CHUNK_SIZE_LEN)
-        return RET_CRYPTO_NEED_MORE;
-
-    /* Decrypt Length */
-    err = gcry_cipher_setiv(ctx->cipher->hd, n_copy, nlen);
-    if (err)
-    {
-        ws_critical("Failed to set IV: %s", gcry_strerror(err));
-        return RET_CRYPTO_ERROR;
-    }
-    // NOTE: The `outsize` should always be expected length + tag length
-    err = gcry_cipher_decrypt(ctx->cipher->hd, len_buf, 2 + tlen, c, CHUNK_SIZE_LEN + tlen);
-    if (err)
-    {
-        ws_critical("Failed to decrypt length: %s", gcry_strerror(err));
-        return RET_CRYPTO_ERROR;
-    }
-
-    if (plen == NULL)
-        plen = wmem_new0(wmem_file_scope(), size_t);
-    *plen = load16_be(len_buf);
-    *plen = *plen & CHUNK_SIZE_MASK;
-
-    if (*plen == 0)
-    {
-        ws_critical("Invalid message length decoded: %lu", *plen);
-        return RET_CRYPTO_ERROR;
-    }
-
-    chunk_len = 2 * tlen + CHUNK_SIZE_LEN + *plen;
-
-    if (clen < chunk_len)
-    {
-        return RET_CRYPTO_NEED_MORE;
-    }
-
-    sodium_increment(n_copy, nlen);
-
-    /* Decrypt Content */
-    err = gcry_cipher_setiv(ctx->cipher->hd, n_copy, nlen);
-    if (err)
-    {
-        ws_critical("Failed to set IV: %s", gcry_strerror(err));
-        return RET_CRYPTO_ERROR;
-    }
-    err = gcry_cipher_decrypt(ctx->cipher->hd, p, *plen + tlen, c + CHUNK_SIZE_LEN + tlen, *plen + tlen);
-    if (err)
-    {
-        ws_critical("Failed to decrypt content: %s", gcry_strerror(err));
-        return RET_CRYPTO_ERROR;
-    }
-    sodium_increment(n_copy, nlen);
-
-    return RET_OK;
-}
-
-/**
  * @brief A relay header is typically sent after the salt by the client to the server.
  *  It contains the destination address and port that the client wants to connect to.
  *  Structure (decrypted):
@@ -481,14 +406,18 @@ get_ss_message_len(packet_info *pinfo _U_, tvbuff_t *tvb, int offset _U_, void *
 
 int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
-    proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
-    proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
-    uint32_t *pinfo_num_copy;
+    conversation_t *conversation;
+    ss_conv_data_t *conv_data _U_;
+    uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     int prev_pkt_type, *cur_pkt_type;
     wmem_list_frame_t *cur_list_frame;
     // ss_buffer_t *buf = ss_buf;
+    proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
+    proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
 
-    pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
+    /*** Conversation ***/
+    conversation = find_or_create_conversation(pinfo);
+    conv_data = (ss_conv_data_t *)get_ss_conv_data(conversation, proto_ss);
 
     /*** Protocol Tree ***/
     ti = proto_tree_add_item(tree, proto_ss, tvb, 0, -1, ENC_NA);
@@ -791,7 +720,7 @@ void proto_reg_handoff_ss(void)
     dissector_add_uint_with_preference("tcp.port", SHADOWSOCKS_TCP_PORT, ss_handle);
 }
 
-/********** Routine **********/
+/********** Routines **********/
 void ss_init_routine(void)
 {
     ss_crypto = ss_crypto_init(pref_password, NULL, supported_aead_ciphers[pref_cipher]);
@@ -838,7 +767,98 @@ void ss_cleanup_routine(void)
     wmem_free(wmem_file_scope(), pkt_order_list);
 }
 
+/********** Conversation **********/
+ss_conv_data_t *get_ss_conv_data(conversation_t *conversation, const int proto)
+{
+    ss_conv_data_t *conv_data;
+
+    conv_data = (ss_conv_data_t *)conversation_get_proto_data(conversation, proto);
+    if (conv_data != NULL)
+        return conv_data;
+
+    conv_data = wmem_new0(wmem_file_scope(), ss_conv_data_t);
+    // TODO: Initialize the fields
+
+    conversation_add_proto_data(conversation, proto, conv_data);
+    return conv_data;
+}
+
 /********** Crypto **********/
+/**
+ * @brief Decrypt the content of the packet.
+ * @param ctx cipher context
+ * @param p plaintext (output)
+ * @param c ciphertext
+ * @param n nonce
+ * @param plen plaintext length (output)
+ * @param clen ciphertext length
+ * @return 0 on success and an error code otherwise
+ */
+int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t *p, uint8_t *c, uint8_t *n, size_t *plen, size_t clen)
+{
+    gcry_error_t err = GPG_ERR_NO_ERROR;
+    size_t nlen = ctx->cipher->nonce_len;
+    size_t tlen = ctx->cipher->tag_len;
+    uint8_t *len_buf = wmem_alloc0(wmem_file_scope(), 2 + tlen);
+    size_t chunk_len;
+    uint8_t *n_copy = wmem_memdup(wmem_file_scope(), n, nlen);
+
+    if (clen <= 2 * tlen + CHUNK_SIZE_LEN)
+        return RET_CRYPTO_NEED_MORE;
+
+    /* Decrypt Length */
+    err = gcry_cipher_setiv(ctx->cipher->hd, n_copy, nlen);
+    if (err)
+    {
+        ws_critical("Failed to set IV: %s", gcry_strerror(err));
+        return RET_CRYPTO_ERROR;
+    }
+    // NOTE: The `outsize` should always be expected length + tag length
+    err = gcry_cipher_decrypt(ctx->cipher->hd, len_buf, 2 + tlen, c, CHUNK_SIZE_LEN + tlen);
+    if (err)
+    {
+        ws_critical("Failed to decrypt length: %s", gcry_strerror(err));
+        return RET_CRYPTO_ERROR;
+    }
+
+    if (plen == NULL)
+        plen = wmem_new0(wmem_file_scope(), size_t);
+    *plen = load16_be(len_buf);
+    *plen = *plen & CHUNK_SIZE_MASK;
+
+    if (*plen == 0)
+    {
+        ws_critical("Invalid message length decoded: %lu", *plen);
+        return RET_CRYPTO_ERROR;
+    }
+
+    chunk_len = 2 * tlen + CHUNK_SIZE_LEN + *plen;
+
+    if (clen < chunk_len)
+    {
+        return RET_CRYPTO_NEED_MORE;
+    }
+
+    sodium_increment(n_copy, nlen);
+
+    /* Decrypt Content */
+    err = gcry_cipher_setiv(ctx->cipher->hd, n_copy, nlen);
+    if (err)
+    {
+        ws_critical("Failed to set IV: %s", gcry_strerror(err));
+        return RET_CRYPTO_ERROR;
+    }
+    err = gcry_cipher_decrypt(ctx->cipher->hd, p, *plen + tlen, c + CHUNK_SIZE_LEN + tlen, *plen + tlen);
+    if (err)
+    {
+        ws_critical("Failed to decrypt content: %s", gcry_strerror(err));
+        return RET_CRYPTO_ERROR;
+    }
+    sodium_increment(n_copy, nlen);
+
+    return RET_OK;
+}
+
 /**
  * @brief Extract a pseudorandom key from `salt` and `ikm` arguments.
  *  And generate output key material based on an `info` value.

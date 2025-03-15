@@ -111,34 +111,39 @@ typedef struct ss_crypto
 {
     ss_cipher_t *cipher;
 
-    // int (*const encrypt_all)(ss_buffer_t *, ss_cipher_t *, size_t);
     // int (*const decrypt_all)(ss_buffer_t *, ss_cipher_t *, size_t);
-    // int (*const encrypt)(ss_buffer_t *, ss_cipher_ctx_t *, size_t);
-    int (*const decrypt)(ss_buffer_t *, ss_cipher_ctx_t *, size_t);
+    // int (*const decrypt)(ss_buffer_t *, ss_cipher_ctx_t *, size_t);
 
     void (*const ctx_init)(ss_cipher_t *, ss_cipher_ctx_t *);
     void (*const ctx_release)(ss_cipher_ctx_t *);
 } ss_crypto_t;
 
+typedef struct ss_conv_data
+{
+    // TODO: Add fields
+} ss_conv_data_t;
+
 /********** Function Prototypes **********/
 /* Register */
 void proto_reg_handoff_ss(void);
 void proto_register_ss(void);
-/* Routine */
+/* Routines */
 void ss_init_routine(void);
 void ss_cleanup_routine(void);
+/* Conversation */
+ss_conv_data_t *get_ss_conv_data(conversation_t *conversation, const int proto_ss);
+/* Crypto */
+int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t *p, uint8_t *c, uint8_t *n, size_t *plen, size_t clen);
+gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx);
+ss_crypto_t *ss_crypto_init(const char *password, const char *key, const char *method);
+void ss_aead_ctx_init(ss_cipher_t *cipher, ss_cipher_ctx_t *cipher_ctx);
+void ss_aead_ctx_release(ss_cipher_ctx_t *cipher_ctx);
 /* Buffer Operations */
 int ss_balloc(ss_buffer_t *ptr, size_t capacity);
 int ss_brealloc(ss_buffer_t *ptr, size_t len, size_t capacity);
 void ss_bfree(ss_buffer_t *ptr);
 int ss_bprepend(ss_buffer_t *dst, ss_buffer_t *src, size_t capacity);
-/* Crypto */
-gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx);
-ss_crypto_t *ss_crypto_init(const char *password, const char *key, const char *method);
-int aead_decrypt(ss_buffer_t *ciphertext, ss_cipher_ctx_t *cipher_ctx, size_t capacity);
-void ss_aead_ctx_init(ss_cipher_t *cipher, ss_cipher_ctx_t *cipher_ctx);
-void ss_aead_ctx_release(ss_cipher_ctx_t *cipher_ctx);
-/********** Utils **********/
+/* Utils */
 uint16_t load16_be(const void *s);
 void sodium_increment(unsigned char *n, const size_t nlen);
 int validate_hostname(const char *hostname, const int hostname_len);

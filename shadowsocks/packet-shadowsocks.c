@@ -52,6 +52,12 @@ static int hf_cipher_ctx_cipher_nonce_len;
 static int hf_cipher_ctx_cipher_key_len;
 static int hf_cipher_ctx_cipher_tag_len;
 static int hf_salt;
+static int hf_atyp;
+static int hf_dst_addr_ipv4;
+static int hf_dst_addr_domainname_len;
+static int hf_dst_addr_domainname;
+static int hf_dst_addr_ipv6;
+static int hf_dst_port;
 
 static const value_string hf_cipher_ctx_cipher_method_vals[] = {
     {AEAD_CIPHER_AES128GCM, "aes-128-gcm"},
@@ -62,6 +68,12 @@ static const value_string hf_cipher_ctx_cipher_method_vals[] = {
     {AEAD_CIPHER_XCHACHA20POLY1305IETF, "xchacha20-ietf-poly1305"},
 #endif
     {AEAD_CIPHER_NONE, NULL},
+};
+static const value_string hf_atyp_vals[] = {
+    {RELAY_HEADER_ATYP_IPV4, "IPv4"},
+    {RELAY_HEADER_ATYP_DOMAINNAME, "Domain Name"},
+    {RELAY_HEADER_ATYP_IPV6, "IPv6"},
+    {0, NULL},
 };
 
 /********** Subtree Pointers **********/
@@ -115,6 +127,7 @@ static const int supported_aead_ciphers_tag_size[AEAD_CIPHER_NUM] = {
 /* Hash Tables (use pinfo->num as key) */
 static wmem_map_t *pkt_type_map;
 static wmem_map_t *nonce_map;
+static wmem_map_t *next_tvb_map;
 // NOTE: `shadowsocks-libev` uses a bloom filter to store and check salts. Here a hash table is used instead.
 // NOTE AGAIN: Seems that it is used to avoid replay attacks only, so not necessary here?
 // static wmem_map_t *salts;
@@ -271,14 +284,13 @@ int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t *p, uint8_t *c, uint8_t *n, si
 int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
 {
     int ret = RET_OK;
-    uint32_t *pinfo_num_copy;
+    uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
+    tvbuff_t *next_tvb;
     uint8_t *cur_nonce;
     ss_buffer_t plaintext = {0, 0, 0, NULL};
     size_t *plen = wmem_new0(wmem_file_scope(), size_t);
-    tvbuff_t *next_tvb;
 
     /*** Nonce ***/
-    pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     cur_nonce = (uint8_t *)wmem_map_lookup(nonce_map, pinfo_num_copy);
     if (cur_nonce == NULL)
     {
@@ -303,35 +315,37 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *t
     /*** New Tab ***/
     next_tvb = tvb_new_child_real_data(tvb, plaintext.data, *plen, *plen);
     add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Relay Header");
+    wmem_map_insert(next_tvb_map, pinfo_num_copy, next_tvb);
 
     /*** Dissect the Decrypted Data ***/
     int offset = 0;
-    char atyp = plaintext.data[offset++];
+    // char atyp = plaintext.data[offset++];
+    char atyp = tvb_get_uint8(next_tvb, offset++);
     char host[255];
 
     /* IPv4: 4 bytes */
-    if ((atyp & ADDRTYPE_MASK) == 1)
+    if ((atyp & ADDRTYPE_MASK) == RELAY_HEADER_ATYP_IPV4)
     {
-        size_t in_addr_len = sizeof(struct in_addr);
-        if (*plen > in_addr_len + 3)
+        if (*plen > WS_INET_ADDRSTRLEN + 3)
         { // Invalid length
             ws_critical("Invalid length for IPv4 address: %ln", plen);
             return PKT_TYPE_ERROR;
         }
-        else if (*plen < in_addr_len + 3)
+        else if (*plen < WS_INET_ADDRSTRLEN + 3)
         { // Maybe the relay header is split into multiple packets
             return PKT_TYPE_RELAY_HEADER_NEED_MORE;
         }
         else
         {
-            inet_ntop(AF_INET, (const void *)(plaintext.data + offset), host, INET_ADDRSTRLEN);
-            offset += in_addr_len;
+            uint32_t host_ipv4 = tvb_get_ipv4(next_tvb, offset);
+            ws_inet_ntop4(&host_ipv4, host, sizeof(host));
+            offset += WS_INET_ADDRSTRLEN;
         }
     }
     /* Domain name: 1 byte length + domain name */
-    else if ((atyp & ADDRTYPE_MASK) == 3)
+    else if ((atyp & ADDRTYPE_MASK) == RELAY_HEADER_ATYP_DOMAINNAME)
     {
-        uint8_t name_len = *(uint8_t *)(plaintext.data + offset);
+        uint8_t name_len = tvb_get_uint8(next_tvb, offset);
         if ((int)*plen > name_len + 4)
         { // Invalid length
             ws_critical("Invalid length for host name: %ln", plen);
@@ -343,7 +357,7 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *t
         }
         else
         {
-            memcpy(host, plaintext.data + offset + 1, name_len);
+            tvb_memcpy(next_tvb, host, offset + 1, name_len);
             offset += name_len + 1;
 
             if (!validate_hostname(host, name_len))
@@ -354,22 +368,23 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *t
         }
     }
     /* IPv6: 16 bytes */
-    else if ((atyp & ADDRTYPE_MASK) == 4)
+    else if ((atyp & ADDRTYPE_MASK) == RELAY_HEADER_ATYP_IPV6)
     {
-        size_t in6_addr_len = sizeof(struct in6_addr);
-        if (*plen > in6_addr_len + 3)
+        if (*plen > WS_INET6_ADDRSTRLEN + 3)
         { // Invalid length
             ws_critical("Invalid length for IPv6 address: %ln", plen);
             return PKT_TYPE_ERROR;
         }
-        else if (*plen < in6_addr_len + 3)
+        else if (*plen < WS_INET6_ADDRSTRLEN + 3)
         { // Maybe the relay header is split into multiple packets
             return PKT_TYPE_RELAY_HEADER_NEED_MORE;
         }
         else
         {
-            inet_ntop(AF_INET6, (const void *)(plaintext.data + offset), host, INET6_ADDRSTRLEN);
-            offset += in6_addr_len;
+            ws_in6_addr host_ipv6;
+            tvb_get_ipv6(next_tvb, offset, &host_ipv6);
+            ws_inet_ntop6(&host_ipv6, host, sizeof(host));
+            offset += WS_INET6_ADDRSTRLEN;
         }
     }
 
@@ -380,7 +395,23 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *t
     }
 
     /*** Protocol Tree ***/
-    printf("Host: %s\n", host);
+    proto_tree_add_item(tree, hf_atyp, next_tvb, 0, 1, ENC_BIG_ENDIAN);
+    if ((atyp & ADDRTYPE_MASK) == RELAY_HEADER_ATYP_IPV4)
+    {
+        proto_tree_add_item(tree, hf_dst_addr_ipv4, next_tvb, 1, 4, ENC_BIG_ENDIAN);
+        proto_tree_add_item(tree, hf_dst_port, next_tvb, 5, 2, ENC_BIG_ENDIAN);
+    }
+    else if ((atyp & ADDRTYPE_MASK) == RELAY_HEADER_ATYP_DOMAINNAME)
+    {
+        proto_tree_add_item(tree, hf_dst_addr_domainname_len, next_tvb, 1, 1, ENC_BIG_ENDIAN);
+        proto_tree_add_item(tree, hf_dst_addr_domainname, next_tvb, 2, strlen(host), ENC_ASCII);
+        proto_tree_add_item(tree, hf_dst_port, next_tvb, 2 + strlen(host), 2, ENC_BIG_ENDIAN);
+    }
+    else if ((atyp & ADDRTYPE_MASK) == RELAY_HEADER_ATYP_IPV6)
+    {
+        proto_tree_add_item(tree, hf_dst_addr_ipv6, next_tvb, 1, 16, ENC_BIG_ENDIAN);
+        proto_tree_add_item(tree, hf_dst_port, next_tvb, 17, 2, ENC_BIG_ENDIAN);
+    }
 
     return PKT_TYPE_RELAY_HEADER;
 }
@@ -490,42 +521,59 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     {
         cur_pkt_type = wmem_new0(wmem_file_scope(), int);
         *cur_pkt_type = PKT_TYPE_UNSET;
-    }
-    /* Get previous packet type */
-    cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
-    if (cur_list_frame == NULL)
-        wmem_list_append(pkt_order_list, pinfo_num_copy); // Add the current packet to the list
-    cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
-    prev_pkt_type = get_prev_pkt_type(cur_list_frame);
-    /* [SALT] */
-    if (prev_pkt_type <= PKT_TYPE_UNSET)
-    {
-        *cur_pkt_type = dissect_ss_salt(tvb, pinfo, ss_tree, NULL);
-    }
-    /* [NEED MORE] */
-    else if (prev_pkt_type >= PKT_TYPE_SALT_NEED_MORE)
-    {
-        // TODO: Handle the case where the previous packet is not complete. Temorarily set it to unknown.
-        *cur_pkt_type = PKT_TYPE_UNKNOWN;
-    }
-    else
-    {
-        /* [RELAY HEADER] */
-        if (prev_pkt_type == PKT_TYPE_SALT)
+        /* Get previous packet type */
+        cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
+        if (cur_list_frame == NULL)
+            wmem_list_append(pkt_order_list, pinfo_num_copy); // Add the current packet to the list
+        cur_list_frame = wmem_list_find(pkt_order_list, pinfo_num_copy);
+        prev_pkt_type = get_prev_pkt_type(cur_list_frame);
+        /* [SALT] */
+        if (prev_pkt_type <= PKT_TYPE_UNSET)
         {
-            *cur_pkt_type = dissect_ss_relay_header(tvb, pinfo, ss_tree, NULL);
+            *cur_pkt_type = dissect_ss_salt(tvb, pinfo, ss_tree, NULL);
         }
-        else if (prev_pkt_type == PKT_TYPE_RELAY_HEADER)
+        /* [NEED MORE] */
+        else if (prev_pkt_type >= PKT_TYPE_SALT_NEED_MORE)
         {
-            *cur_pkt_type = PKT_TYPE_STREAM_DATA;
+            // TODO: Handle the case where the previous packet is not complete. Temorarily set it to unknown.
+            *cur_pkt_type = PKT_TYPE_UNKNOWN;
         }
         else
         {
-            *cur_pkt_type = PKT_TYPE_UNKNOWN;
+            /* [RELAY HEADER] */
+            if (prev_pkt_type == PKT_TYPE_SALT)
+            {
+                *cur_pkt_type = dissect_ss_relay_header(tvb, pinfo, ss_tree, NULL);
+            }
+            else if (prev_pkt_type == PKT_TYPE_RELAY_HEADER)
+            {
+                *cur_pkt_type = PKT_TYPE_STREAM_DATA;
+            }
+            else
+            {
+                *cur_pkt_type = PKT_TYPE_UNKNOWN;
+            }
+        }
+        wmem_map_insert(pkt_type_map, pinfo_num_copy, cur_pkt_type);
+        ss_last_pkt_type = *cur_pkt_type;
+    }
+    else
+    {
+        switch (*cur_pkt_type)
+        {
+        case PKT_TYPE_SALT:
+            *cur_pkt_type = dissect_ss_salt(tvb, pinfo, ss_tree, NULL);
+            break;
+        case PKT_TYPE_RELAY_HEADER:
+            *cur_pkt_type = dissect_ss_relay_header(tvb, pinfo, ss_tree, NULL);
+            break;
+        case PKT_TYPE_STREAM_DATA:
+            *cur_pkt_type = dissect_ss_message(tvb, pinfo, ss_tree, NULL);
+            break;
+        default:
+            break;
         }
     }
-    wmem_map_insert(pkt_type_map, pinfo_num_copy, cur_pkt_type);
-    ss_last_pkt_type = *cur_pkt_type;
 
     /* Protocol Tree */
     if (*cur_pkt_type > PKT_TYPE_SALT && *cur_pkt_type < PKT_TYPE_SALT_NEED_MORE)
@@ -671,6 +719,42 @@ void proto_register_ss(void)
           FT_BYTES,
           BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
+        {&hf_atyp,
+         {"Address Type",
+          "shadowsocks.atyp",
+          FT_UINT8,
+          BASE_DEC,
+          VALS(hf_atyp_vals), 0x0, NULL, HFILL}},
+        {&hf_dst_addr_ipv4,
+         {"IPv4 Address",
+          "shadowsocks.dst_addr.ipv4",
+          FT_IPv4,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_dst_addr_domainname_len,
+         {"Domain Name Length",
+          "shadowsocks.dst_addr.domainname_len",
+          FT_UINT8,
+          BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_dst_addr_domainname,
+         {"Domain Name",
+          "shadowsocks.dst_addr.domainname",
+          FT_STRING,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_dst_addr_ipv6,
+         {"IPv6 Address",
+          "shadowsocks.dst_addr.ipv6",
+          FT_IPv6,
+          BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
+        {&hf_dst_port,
+         {"Destination Port",
+          "shadowsocks.dst_port",
+          FT_UINT16,
+          BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
     };
 
     /* Subtree array */
@@ -728,6 +812,7 @@ void ss_init_routine(void)
 
     pkt_type_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
     nonce_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
+    next_tvb_map = wmem_map_new(wmem_file_scope(), g_str_hash, g_str_equal);
     // salts = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
     pkt_order_list = wmem_list_new(wmem_file_scope());
 }
@@ -748,6 +833,7 @@ void ss_cleanup_routine(void)
 
     wmem_free(wmem_file_scope(), pkt_type_map);
     wmem_free(wmem_file_scope(), nonce_map);
+    wmem_free(wmem_file_scope(), next_tvb_map);
     // wmem_free(wmem_file_scope(), salts);
     wmem_free(wmem_file_scope(), pkt_order_list);
 }
@@ -1223,6 +1309,16 @@ void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_n
     for (size_t i = 0; i < len; i++)
     {
         printf("%02x", array[i]);
+    }
+    printf("\n");
+}
+
+void debug_print_tvb(tvbuff_t *tvb, const char *var_name)
+{
+    printf("[DEBUG] %s: ", var_name);
+    for (size_t i = 0; i < tvb_captured_length(tvb); i++)
+    {
+        printf("%02x", tvb_get_uint8(tvb, i));
     }
     printf("\n");
 }

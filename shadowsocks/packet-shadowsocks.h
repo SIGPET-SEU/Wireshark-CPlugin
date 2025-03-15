@@ -61,6 +61,10 @@
 #define MAX_PORT_STR_LEN 6   // PORT < 65536
 #define INET_SIZE 4
 #define INET6_SIZE 16
+/* ATYP in Relay Header */
+#define RELAY_HEADER_ATYP_IPV4 1
+#define RELAY_HEADER_ATYP_DOMAINNAME 3
+#define RELAY_HEADER_ATYP_IPV6 4
 /* Return Codes */
 #define RET_WRONG_PKT_TYPE -3
 #define RET_CRYPTO_ERROR -2
@@ -142,3 +146,4 @@ int get_prev_pkt_type(wmem_list_frame_t *frame);
 /* Debugging */
 void debug_print_hash_table(wmem_map_t *hash_table, const char *var_name);
 void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_name);
+void debug_print_tvb(tvbuff_t *tvb, const char *var_name);

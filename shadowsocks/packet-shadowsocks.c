@@ -203,11 +203,11 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         break;
     case PKT_TYPE_RELAY_HEADER:
         col_set_str(pinfo->cinfo, COL_INFO, "[Relay Header]");
-        dissect_ss_relay_header(tvb, pinfo, ss_tree, data);
+        dissect_ss_relay_header(tvb, pinfo, ss_tree, data, FALSE);
         break;
     case PKT_TYPE_STREAM_DATA:
         col_set_str(pinfo->cinfo, COL_INFO, "[Data]");
-        dissect_ss_stream_data(tvb, pinfo, ss_tree, data);
+        dissect_ss_stream_data(tvb, pinfo, ss_tree, data, FALSE);
         break;
     case PKT_TYPE_SALT_NEED_MORE:
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt (Need More)]");
@@ -222,12 +222,22 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
                          get_ss_pdu_len,
                          dissect_ss_pdu, NULL);
         break;
+    case PKT_TYPE_SALT_REASSEMBLY:
+        col_set_str(pinfo->cinfo, COL_INFO, "[Salt (Reassembly)]");
+        // TODO
+        break;
+    case PKT_TYPE_RELAY_HEADER_REASSEMBLY:
+        col_set_str(pinfo->cinfo, COL_INFO, "[Relay Header (Reassembly)]");
+        dissect_ss_relay_header(tvb, pinfo, ss_tree, data, TRUE);
+        break;
+    case PKT_TYPE_STREAM_DATA_REASSEMBLY:
+        col_set_str(pinfo->cinfo, COL_INFO, "[Data (Reassembly)]");
+        dissect_ss_stream_data(tvb, pinfo, ss_tree, data, TRUE);
+        break;
     default:
         ws_critical("[%u] Unknown packet type: %d", pinfo->num, *cur_pkt_type);
         break;
     }
-    // ss_buf->len = tvb_captured_length(tvb);
-    // ss_crypto->decrypt(ss_buf, ss_cipher_ctx, BUF_SIZE);
 
     return tvb_captured_length(tvb);
 }
@@ -288,8 +298,9 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         return PKT_TYPE_SALT;
         break;
     case PKT_TYPE_SALT:
+    case PKT_TYPE_SALT_REASSEMBLY:
         /* Check if it is [RELAY HEADER] */
-        get_nonce(*pinfo_num_copy, &cur_nonce);
+        get_nonce(*pinfo_num_copy, &cur_nonce, FALSE);
         /* Decryption */
         int ret = ss_aead_decrypt(ss_cipher_ctx,
                                   &plaintext,
@@ -365,8 +376,10 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         break;
     case PKT_TYPE_RELAY_HEADER:
     case PKT_TYPE_STREAM_DATA:
+    case PKT_TYPE_RELAY_HEADER_REASSEMBLY:
+    case PKT_TYPE_STREAM_DATA_REASSEMBLY:
         /* Check if it is [STREAM DATA] */
-        get_nonce(*pinfo_num_copy, &cur_nonce);
+        get_nonce(*pinfo_num_copy, &cur_nonce, FALSE);
         /* Decryption */
         ret = ss_aead_decrypt(ss_cipher_ctx,
                               &plaintext,
@@ -382,10 +395,13 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         return PKT_TYPE_STREAM_DATA;
         break;
     case PKT_TYPE_SALT_NEED_MORE:
+        return PKT_TYPE_SALT_REASSEMBLY;
+        break;
     case PKT_TYPE_RELAY_HEADER_NEED_MORE:
+        return PKT_TYPE_RELAY_HEADER_REASSEMBLY;
+        break;
     case PKT_TYPE_STREAM_DATA_NEED_MORE:
-        // TODO
-        return PKT_TYPE_UNKNOWN;
+        return PKT_TYPE_STREAM_DATA_REASSEMBLY;
         break;
     default:
         ws_error("[%u] Unknown previous packet type: %d", pinfo_num, prev_pkt_type);
@@ -429,7 +445,7 @@ void dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, vo
  *  DST.PORT: desired destination port in network octet order
  * @return packet type
  */
-void dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+void dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_, int reassembly_flag)
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
@@ -442,7 +458,7 @@ void dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree
     int host_len;
 
     /*** Nonce ***/
-    get_nonce(*pinfo_num_copy, &cur_nonce);
+    get_nonce(*pinfo_num_copy, &cur_nonce, reassembly_flag);
 
     /*** Decryption ***/
     int ret = ss_aead_decrypt(ss_cipher_ctx,
@@ -491,7 +507,7 @@ void dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree
     proto_tree_add_item(tree, hf_dst_port, next_tvb, offset, 2, ENC_BIG_ENDIAN);
 }
 
-void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_)
+void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag)
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
@@ -501,7 +517,7 @@ void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree 
     tvbuff_t *next_tvb;
 
     /*** Nonce ***/
-    get_nonce(*pinfo_num_copy, &cur_nonce);
+    get_nonce(*pinfo_num_copy, &cur_nonce, reassembly_flag);
 
     /*** Decryption ***/
     int ret = ss_aead_decrypt(ss_cipher_ctx,
@@ -512,7 +528,7 @@ void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree 
                               (size_t)tvb_len);
     if (ret != RET_OK)
     {
-        ws_error("[%u] Failed to decrypt relay header", pinfo->num);
+        ws_error("[%u] Failed to decrypt stream data", pinfo->num);
         exit(-1);
     }
 
@@ -527,7 +543,7 @@ void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree 
 int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
 {
     // TODO: Implement
-    ws_message("Dissecting PDU");
+    ws_message("[%u] Dissecting fully reassembled messages", pinfo->num);
     return tvb_captured_length(tvb);
 }
 
@@ -544,26 +560,26 @@ unsigned get_ss_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void 
     uint16_t plen;
 
     /*** Nonce ***/
-    get_nonce(pinfo->num, &cur_nonce);
+    get_nonce(pinfo->num, &cur_nonce, FALSE);
 
     /* Decrypt Length */
     if (tvb_captured_length(tvb) <= CHUNK_SIZE_LEN * tlen + CHUNK_SIZE_LEN)
     {
-        ws_error("[%u] Not enough data to decrypt `plen`", pinfo->num);
-        exit(-1);
+        ws_critical("[%u] Not enough data to decrypt `plen`", pinfo->num);
+        return 0;
     }
     err = gcry_cipher_setiv(ss_cipher_ctx->cipher->hd, cur_nonce, nlen);
     if (err)
     {
-        ws_error("[%u] Failed to set IV: %s", pinfo->num, gcry_strerror(err));
-        exit(-1);
+        ws_critical("[%u] Failed to set IV: %s", pinfo->num, gcry_strerror(err));
+        return -1;
     }
     // NOTE: The `outsize` should always be expected length + tag length
     err = gcry_cipher_decrypt(ss_cipher_ctx->cipher->hd, len_buf, CHUNK_SIZE_LEN + tlen, tvb_get_ptr(tvb, 0, CHUNK_SIZE_LEN + tlen), CHUNK_SIZE_LEN + tlen);
     if (err)
     {
         ws_critical("[%u] Failed to decrypt length: %s", pinfo->num, gcry_strerror(err));
-        exit(-1);
+        return -1;
     }
 
     plen = load16_be(len_buf);
@@ -573,12 +589,12 @@ unsigned get_ss_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void 
     if (plen == 0)
     {
         ws_critical("[%u] Invalid message length decoded: %d", pinfo->num, plen);
-        exit(-1);
+        return -1;
     }
 
+    // NOTE: encrypted payload length(2) | length tag(tlen) | encrypted payload(plen) | payload tag(tlen)
     /* Cast to unsigned */
-    ws_message("[%u] Fully reassembled message length: %d", pinfo->num, plen);
-    return (unsigned)plen;
+    return (unsigned)(CHUNK_SIZE_LEN + plen + 2 * tlen);
 }
 
 /********** Registers **********/
@@ -864,9 +880,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t **p, uint8_t *c, uint8_t *n, s
     chunk_len = 2 * tlen + CHUNK_SIZE_LEN + tmp_plen;
 
     if (clen < chunk_len)
-    {
         return RET_CRYPTO_NEED_MORE;
-    }
 
     sodium_increment(n_copy, nlen);
 
@@ -1368,7 +1382,7 @@ int get_prev_pkt_type(wmem_list_frame_t *frame)
  * @param pinfo_num Packet number
  * @param nonce Pointer to the nonce (output)
  */
-void get_nonce(uint32_t pinfo_num, uint8_t **nonce)
+void get_nonce(uint32_t pinfo_num, uint8_t **nonce, int reassembly_flag)
 {
     uint32_t *pinfo_num_copy = wmem_memdup(wmem_file_scope(), &pinfo_num, sizeof(uint32_t));
     size_t nonce_len = ss_cipher_ctx->cipher->nonce_len;
@@ -1403,10 +1417,14 @@ void get_nonce(uint32_t pinfo_num, uint8_t **nonce)
             exit(-1);
         }
         prev_nonce = (uint8_t *)wmem_map_lookup(nonce_map, prev_pinfo_num);
-        /* If last nonce is found, return the incremented value */
+        /* If last nonce is found,
+         return the incremented value(for normal packets)
+         or the same value(for reassembled packets) */
         if (prev_nonce != NULL)
         {
             nonce_copy = wmem_memdup(wmem_file_scope(), prev_nonce, nonce_len);
+            if (reassembly_flag)
+                break;
             sodium_increment(nonce_copy, nonce_len);
             sodium_increment(nonce_copy, nonce_len);
             break;

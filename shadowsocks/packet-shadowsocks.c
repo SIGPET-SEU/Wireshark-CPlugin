@@ -217,6 +217,10 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         break;
     case PKT_TYPE_STREAM_DATA_NEED_MORE:
         col_set_str(pinfo->cinfo, COL_INFO, "[Data (Need More)]");
+        tcp_dissect_pdus(tvb, pinfo, ss_tree, TRUE,
+                         CHUNK_SIZE_LEN + ss_cipher_ctx->cipher->tag_len,
+                         get_ss_pdu_len,
+                         dissect_ss_pdu, NULL);
         break;
     default:
         ws_critical("[%u] Unknown packet type: %d", pinfo->num, *cur_pkt_type);
@@ -391,7 +395,7 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
 }
 
 /**
- * @brief An AEAD encrypted TCP stream starts with a randomly generated salt to derive the per-session subkey (server -> client).
+ * @brief An AEAD encrypted TCP stream starts with a randomly generated salt to derive the per-session subkey (client -> server).
  *  Structure:
  *  +----------+
  *  |   Salt   |
@@ -523,39 +527,57 @@ void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree 
 int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
 {
     // TODO: Implement
+    ws_message("Dissecting PDU");
     return tvb_captured_length(tvb);
 }
 
 /**
  * @brief Determine PDU length of protocol Shadowsocks
  */
-unsigned get_ss_pdu_len(packet_info *pinfo _U_, tvbuff_t *tvb, int offset _U_, void *data _U_)
+unsigned get_ss_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_)
 {
-    uint8_t *cur_nonce = wmem_alloc0(wmem_file_scope(), ss_crypto->cipher->nonce_len);
-    size_t tlen = ss_cipher_ctx->cipher->tag_len;
+    gcry_error_t err = GPG_ERR_NO_ERROR;
+    uint8_t *cur_nonce = NULL;
     size_t nlen = ss_cipher_ctx->cipher->nonce_len;
-    size_t plen;
-    uint8_t *len_buf = wmem_alloc0(wmem_file_scope(), 2 + tlen);
+    size_t tlen = ss_cipher_ctx->cipher->tag_len;
+    uint8_t *len_buf = (uint8_t *)wmem_alloc0(wmem_file_scope(), CHUNK_SIZE_LEN + tlen);
+    uint16_t plen;
 
-    /*** Decryption ***/
-    if (tvb_captured_length(tvb) <= 2 * tlen + CHUNK_SIZE_LEN)
-        ws_error("Not enough data to decrypt `plen`");
-    gcry_error_t err = gcry_cipher_setiv(ss_cipher_ctx->cipher->hd, cur_nonce, nlen);
+    /*** Nonce ***/
+    get_nonce(pinfo->num, &cur_nonce);
+
+    /* Decrypt Length */
+    if (tvb_captured_length(tvb) <= CHUNK_SIZE_LEN * tlen + CHUNK_SIZE_LEN)
+    {
+        ws_error("[%u] Not enough data to decrypt `plen`", pinfo->num);
+        exit(-1);
+    }
+    err = gcry_cipher_setiv(ss_cipher_ctx->cipher->hd, cur_nonce, nlen);
     if (err)
-        ws_error("Failed to set IV: %s", gcry_strerror(err));
+    {
+        ws_error("[%u] Failed to set IV: %s", pinfo->num, gcry_strerror(err));
+        exit(-1);
+    }
     // NOTE: The `outsize` should always be expected length + tag length
-    err = gcry_cipher_decrypt(ss_cipher_ctx->cipher->hd, len_buf, 2 + tlen, tvb_get_ptr(tvb, 0, CHUNK_SIZE_LEN + tlen), CHUNK_SIZE_LEN + tlen);
+    err = gcry_cipher_decrypt(ss_cipher_ctx->cipher->hd, len_buf, CHUNK_SIZE_LEN + tlen, tvb_get_ptr(tvb, 0, CHUNK_SIZE_LEN + tlen), CHUNK_SIZE_LEN + tlen);
     if (err)
-        ws_error("Failed to decrypt length: %s", gcry_strerror(err));
+    {
+        ws_critical("[%u] Failed to decrypt length: %s", pinfo->num, gcry_strerror(err));
+        exit(-1);
+    }
 
     plen = load16_be(len_buf);
+    wmem_free(wmem_file_scope(), len_buf);
     plen = plen & CHUNK_SIZE_MASK;
 
     if (plen == 0)
-        ws_error("Invalid message length decoded: %lu", plen);
+    {
+        ws_critical("[%u] Invalid message length decoded: %d", pinfo->num, plen);
+        exit(-1);
+    }
 
     /* Cast to unsigned */
-    ws_message("Fully reassembled message length: %lu", plen);
+    ws_message("[%u] Fully reassembled message length: %d", pinfo->num, plen);
     return (unsigned)plen;
 }
 

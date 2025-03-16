@@ -53,6 +53,7 @@
 #define PKT_TYPE_SALT 1
 #define PKT_TYPE_RELAY_HEADER 2
 #define PKT_TYPE_STREAM_DATA 3
+// NOTE: For fragmented packets, XXX_NEED_MORE is used to indicate the beginning of reassembly, and XXX_REASSEMBLY is used to indicate the end of reassembly
 #define PKT_TYPE_SALT_NEED_MORE 11
 #define PKT_TYPE_RELAY_HEADER_NEED_MORE 12
 #define PKT_TYPE_STREAM_DATA_NEED_MORE 13
@@ -132,10 +133,11 @@ typedef void (*PrintFunc)(const void *key, const void *value, void *user_data);
 /* Dissectors */
 int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num);
 int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, void *data _U_);
-int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_, int reassembly_flag);
-int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag);
+int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
+int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_);
+tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag);
 int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_);
-unsigned get_ss_pdu_len(packet_info *pinfo _U_, tvbuff_t *tvb, int offset _U_, void *data _U_);
+unsigned get_ss_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_);
 /* Registers */
 void proto_reg_handoff_ss(void);
 void proto_register_ss(void);

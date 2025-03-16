@@ -148,6 +148,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     int *cur_pkt_type;
     proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
     proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
+    tvbuff_t *decrypted_tvb;
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -203,17 +204,23 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         break;
     case PKT_TYPE_RELAY_HEADER:
         col_set_str(pinfo->cinfo, COL_INFO, "[Relay Header]");
-        dissect_ss_relay_header(tvb, pinfo, ss_tree, data, FALSE);
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, ss_tree, data, FALSE);
+        dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, data);
         break;
     case PKT_TYPE_STREAM_DATA:
         col_set_str(pinfo->cinfo, COL_INFO, "[Data]");
-        dissect_ss_stream_data(tvb, pinfo, ss_tree, data, FALSE);
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, ss_tree, data, FALSE);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
         break;
     case PKT_TYPE_SALT_NEED_MORE:
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt (Need More)]");
         break;
     case PKT_TYPE_RELAY_HEADER_NEED_MORE:
         col_set_str(pinfo->cinfo, COL_INFO, "[Relay Header (Need More)]");
+        tcp_dissect_pdus(tvb, pinfo, ss_tree, TRUE,
+                         CHUNK_SIZE_LEN + ss_cipher_ctx->cipher->tag_len,
+                         get_ss_pdu_len,
+                         dissect_ss_pdu, NULL);
         break;
     case PKT_TYPE_STREAM_DATA_NEED_MORE:
         col_set_str(pinfo->cinfo, COL_INFO, "[Data (Need More)]");
@@ -228,11 +235,13 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         break;
     case PKT_TYPE_RELAY_HEADER_REASSEMBLY:
         col_set_str(pinfo->cinfo, COL_INFO, "[Relay Header (Reassembly)]");
-        dissect_ss_relay_header(tvb, pinfo, ss_tree, data, TRUE);
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, ss_tree, data, TRUE);
+        dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, data);
         break;
     case PKT_TYPE_STREAM_DATA_REASSEMBLY:
         col_set_str(pinfo->cinfo, COL_INFO, "[Data (Reassembly)]");
-        dissect_ss_stream_data(tvb, pinfo, ss_tree, data, TRUE);
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, ss_tree, data, TRUE);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
         break;
     default:
         ws_critical("[%u] Unknown packet type: %d", pinfo->num, *cur_pkt_type);
@@ -444,60 +453,33 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, voi
  *      - 0x04: IP V6 address. The DST.ADDR is a version-6 IP address, with a length of 16 octets
  *  DST.ADDR: desired destination address
  *  DST.PORT: desired destination port in network octet order
- * @param reassembly_flag TRUE if the packet is reassembled, FALSE otherwise
  */
-int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_, int reassembly_flag)
+int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
-    uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
-    uint32_t tvb_len = tvb_captured_length(tvb);
-    uint8_t *cur_nonce = NULL;
-    uint8_t *plaintext = NULL;
-    size_t *plen = NULL;
-    tvbuff_t *next_tvb;
     int offset = 0;
     uint8_t atyp;
     int host_len;
 
-    /*** Nonce ***/
-    get_nonce(*pinfo_num_copy, &cur_nonce, reassembly_flag);
-
-    /*** Decryption ***/
-    int ret = ss_aead_decrypt(ss_cipher_ctx,
-                              &plaintext,
-                              (uint8_t *)tvb_get_ptr(tvb, 0, tvb_len),
-                              cur_nonce,
-                              &plen,
-                              (size_t)tvb_len);
-    if (ret != RET_OK)
-    {
-        ws_error("[%u] Failed to decrypt relay header", pinfo->num);
-        exit(-1);
-    }
-
-    /*** New Tab ***/
-    next_tvb = tvb_new_child_real_data(tvb, plaintext, *plen, *plen);
-    add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Relay Header");
-
     /*** Protocol Tree ***/
-    atyp = tvb_get_uint8(next_tvb, offset);
-    proto_tree_add_item(tree, hf_atyp, next_tvb, offset++, 1, ENC_BIG_ENDIAN);
+    atyp = tvb_get_uint8(tvb, offset);
+    proto_tree_add_item(tree, hf_atyp, tvb, offset++, 1, ENC_BIG_ENDIAN);
     switch (atyp & ADDRTYPE_MASK)
     {
     case RELAY_HEADER_ATYP_IPV4:
-        ws_in4_addr in4_addr = tvb_get_ipv4(next_tvb, offset);
+        ws_in4_addr in4_addr = tvb_get_ipv4(tvb, offset);
         host_len = sizeof(struct in_addr);
-        proto_tree_add_ipv4(tree, hf_dst_addr_ipv4, next_tvb, offset, host_len, in4_addr);
+        proto_tree_add_ipv4(tree, hf_dst_addr_ipv4, tvb, offset, host_len, in4_addr);
         break;
     case RELAY_HEADER_ATYP_DOMAINNAME:
-        host_len = (int)tvb_get_uint8(next_tvb, offset);
-        proto_tree_add_item(tree, hf_dst_addr_domainname_len, next_tvb, offset++, 1, ENC_BIG_ENDIAN);
-        proto_tree_add_item(tree, hf_dst_addr_domainname, next_tvb, offset, host_len, ENC_ASCII);
+        host_len = (int)tvb_get_uint8(tvb, offset);
+        proto_tree_add_item(tree, hf_dst_addr_domainname_len, tvb, offset++, 1, ENC_BIG_ENDIAN);
+        proto_tree_add_item(tree, hf_dst_addr_domainname, tvb, offset, host_len, ENC_ASCII);
         break;
     case RELAY_HEADER_ATYP_IPV6:
         ws_in6_addr *in6_addr = wmem_new0(wmem_file_scope(), ws_in6_addr);
-        tvb_get_ipv6(next_tvb, offset, in6_addr);
+        tvb_get_ipv6(tvb, offset, in6_addr);
         host_len = sizeof(struct in6_addr);
-        proto_tree_add_ipv6(tree, hf_dst_addr_ipv6, next_tvb, offset, host_len, in6_addr);
+        proto_tree_add_ipv6(tree, hf_dst_addr_ipv6, tvb, offset, host_len, in6_addr);
         break;
     default:
         ws_error("[%u] Invalid ATYP value: %d", pinfo->num, atyp);
@@ -505,22 +487,29 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         break;
     }
     offset += host_len;
-    proto_tree_add_item(tree, hf_dst_port, next_tvb, offset, 2, ENC_BIG_ENDIAN);
+    proto_tree_add_item(tree, hf_dst_port, tvb, offset, 2, ENC_BIG_ENDIAN);
 
     return tvb_captured_length(tvb);
 }
 
+int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
+{
+    return tvb_captured_length(tvb);
+}
+
 /**
+ * @brief Decrypt the shadowsocks data and return the decrypted tvb for further dissection
  * @param reassembly_flag TRUE if the packet is reassembled, FALSE otherwise
+ * @return The decrypted tvb
  */
-int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag)
+tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag)
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
     uint8_t *cur_nonce = NULL;
     uint8_t *plaintext = NULL;
     size_t *plen = NULL;
-    tvbuff_t *next_tvb;
+    tvbuff_t *decrypted_tvb;
 
     /*** Nonce ***/
     get_nonce(*pinfo_num_copy, &cur_nonce, reassembly_flag);
@@ -534,15 +523,14 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _
                               (size_t)tvb_len);
     if (ret != RET_OK)
     {
-        ws_error("[%u] Failed to decrypt stream data", pinfo->num);
+        ws_error("[%u] Failed to decrypt", pinfo->num);
         exit(-1);
     }
 
     /*** New Tab ***/
-    next_tvb = tvb_new_child_real_data(tvb, plaintext, *plen, *plen);
-    add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Stream Data");
-
-    return tvb_captured_length(tvb);
+    decrypted_tvb = tvb_new_child_real_data(tvb, plaintext, *plen, *plen);
+    add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks");
+    return decrypted_tvb;
 }
 
 int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)

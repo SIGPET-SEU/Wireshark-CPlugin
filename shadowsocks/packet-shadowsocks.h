@@ -104,7 +104,7 @@ typedef struct ss_cipher_ctx
     ss_buffer_t *chunk;
     uint8_t salt[MAX_KEY_LENGTH];
     uint8_t skey[MAX_KEY_LENGTH];
-    uint8_t nonce[MAX_NONCE_LENGTH];
+    // uint8_t nonce[MAX_NONCE_LENGTH];
 } ss_cipher_ctx_t;
 
 typedef struct ss_crypto
@@ -142,7 +142,7 @@ void ss_cleanup_routine(void);
 /* Conversation */
 ss_conv_data_t *get_ss_conv_data(conversation_t *conversation, const int proto_ss);
 /* Crypto */
-int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t *p, uint8_t *c, uint8_t *n, size_t *plen, size_t clen);
+int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t **p, uint8_t *c, uint8_t *n, size_t **plen, size_t clen);
 gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx);
 ss_crypto_t *ss_crypto_init(const char *password, const char *key, const char *method);
 void ss_aead_ctx_init(ss_cipher_t *cipher, ss_cipher_ctx_t *cipher_ctx);
@@ -158,7 +158,7 @@ void sodium_increment(unsigned char *n, const size_t nlen);
 int validate_hostname(const char *hostname, const int hostname_len);
 int cmp_list_frame_uint_data(const void *a, const void *b);
 int get_prev_pkt_type(wmem_list_frame_t *frame);
-void get_nonce(uint32_t pinfo_num, uint8_t *cur_nonce);
+void get_nonce(uint32_t pinfo_num, uint8_t **cur_nonce);
 /* Debugging */
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data _U_);
 void debug_print_uint_key_uint_value(const void *key, const void *value, void *user_data _U_);

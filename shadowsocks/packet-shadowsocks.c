@@ -144,9 +144,8 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 {
     conversation_t *conversation;
     ss_conv_data_t *conv_data _U_;
-    uint32_t *pinfo_num_copy _U_ = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
-    int prev_pkt_type _U_, *cur_pkt_type = wmem_new0(wmem_file_scope(), int);
-    // ss_buffer_t *buf = ss_buf;
+    uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
+    int *cur_pkt_type;
     proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
     proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
 
@@ -156,6 +155,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
     /*** Type Detection ***/
     int tmp_pkt_type = detect_ss_pkt_type(tvb, pinfo->num);
+    cur_pkt_type = wmem_new0(wmem_file_scope(), int);
     memcpy(cur_pkt_type, &tmp_pkt_type, sizeof(int));
     wmem_map_insert(pkt_type_map, pinfo_num_copy, cur_pkt_type);
 
@@ -207,6 +207,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         break;
     case PKT_TYPE_STREAM_DATA:
         col_set_str(pinfo->cinfo, COL_INFO, "[Data]");
+        dissect_ss_stream_data(tvb, pinfo, ss_tree, data);
         break;
     case PKT_TYPE_SALT_NEED_MORE:
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt (Need More)]");
@@ -233,9 +234,9 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &pinfo_num, sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
     int *cur_pkt_type, prev_pkt_type;
-    uint8_t *cur_nonce = wmem_alloc0(wmem_file_scope(), ss_crypto->cipher->nonce_len);
-    uint8_t *plaintext = wmem_alloc0(wmem_file_scope(), BUF_SIZE);
-    size_t *plen = wmem_new0(wmem_file_scope(), size_t);
+    uint8_t *cur_nonce = NULL;
+    uint8_t *plaintext = NULL;
+    size_t *plen = NULL;
     size_t salt_len = ss_crypto->cipher->key_len;
 
     /* Try to get the packet type from the hash table */
@@ -279,17 +280,18 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
             ws_critical("[%u] Failed to set cipher key: %s", pinfo_num, gcry_strerror(err));
             return PKT_TYPE_ERROR;
         }
+        ss_cipher_ctx->init = 1;
         return PKT_TYPE_SALT;
         break;
     case PKT_TYPE_SALT:
         /* Check if it is [RELAY HEADER] */
-        get_nonce(*pinfo_num_copy, cur_nonce);
+        get_nonce(*pinfo_num_copy, &cur_nonce);
         /* Decryption */
         int ret = ss_aead_decrypt(ss_cipher_ctx,
-                                  plaintext,
+                                  &plaintext,
                                   (uint8_t *)tvb_get_ptr(tvb, 0, tvb_len),
                                   cur_nonce,
-                                  plen,
+                                  &plen,
                                   (size_t)tvb_len);
         if (ret == RET_CRYPTO_ERROR)
             return PKT_TYPE_ERROR;
@@ -360,13 +362,13 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
     case PKT_TYPE_RELAY_HEADER:
     case PKT_TYPE_STREAM_DATA:
         /* Check if it is [STREAM DATA] */
-        get_nonce(*pinfo_num_copy, cur_nonce);
+        get_nonce(*pinfo_num_copy, &cur_nonce);
         /* Decryption */
         ret = ss_aead_decrypt(ss_cipher_ctx,
-                              plaintext,
+                              &plaintext,
                               (uint8_t *)tvb_get_ptr(tvb, 0, tvb_len),
                               cur_nonce,
-                              plen,
+                              &plen,
                               (size_t)tvb_len);
         if (ret == RET_CRYPTO_ERROR)
             return PKT_TYPE_ERROR;
@@ -427,23 +429,23 @@ void dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
-    uint8_t *cur_nonce = wmem_alloc0(wmem_file_scope(), ss_crypto->cipher->nonce_len);
-    uint8_t *plaintext = wmem_alloc0(wmem_file_scope(), BUF_SIZE);
-    size_t *plen = wmem_new0(wmem_file_scope(), size_t);
+    uint8_t *cur_nonce = NULL;
+    uint8_t *plaintext = NULL;
+    size_t *plen = NULL;
     tvbuff_t *next_tvb;
     int offset = 0;
     uint8_t atyp;
     int host_len;
 
     /*** Nonce ***/
-    get_nonce(*pinfo_num_copy, cur_nonce);
+    get_nonce(*pinfo_num_copy, &cur_nonce);
 
     /*** Decryption ***/
     int ret = ss_aead_decrypt(ss_cipher_ctx,
-                              plaintext,
+                              &plaintext,
                               (uint8_t *)tvb_get_ptr(tvb, 0, tvb_len),
                               cur_nonce,
-                              plen,
+                              &plen,
                               (size_t)tvb_len);
     if (ret != RET_OK)
     {
@@ -489,20 +491,20 @@ void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree 
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
-    uint8_t *cur_nonce = wmem_alloc0(wmem_file_scope(), ss_crypto->cipher->nonce_len);
-    uint8_t *plaintext = wmem_alloc0(wmem_file_scope(), BUF_SIZE);
-    size_t *plen = wmem_new0(wmem_file_scope(), size_t);
+    uint8_t *cur_nonce = NULL;
+    uint8_t *plaintext = NULL;
+    size_t *plen = NULL;
     tvbuff_t *next_tvb;
 
     /*** Nonce ***/
-    get_nonce(*pinfo_num_copy, cur_nonce);
+    get_nonce(*pinfo_num_copy, &cur_nonce);
 
     /*** Decryption ***/
     int ret = ss_aead_decrypt(ss_cipher_ctx,
-                              plaintext,
+                              &plaintext,
                               (uint8_t *)tvb_get_ptr(tvb, 0, tvb_len),
                               cur_nonce,
-                              plen,
+                              &plen,
                               (size_t)tvb_len);
     if (ret != RET_OK)
     {
@@ -785,22 +787,27 @@ ss_conv_data_t *get_ss_conv_data(conversation_t *conversation, const int proto)
  *  After each encrypt/decrypt operation, the nonce is incremented by one as if it were an unsigned little-endian integer.
  *  Note that each TCP chunk involves two AEAD encrypt/decrypt operation: one for the payload length, and one for the payload.
  *  Therefore each chunk increases the nonce twice.
- * @param ctx cipher context
- * @param p plaintext (output)
- * @param c ciphertext
- * @param n nonce
- * @param plen plaintext length (output)
- * @param clen ciphertext length
+ * @param ctx Cipher context
+ * @param p Pointer to plaintext (output)
+ * @param c Ciphertext
+ * @param n Nonce
+ * @param plen Pointer to plaintext length (output)
+ * @param clen Ciphertext length
  * @return 0 on success and an error code otherwise
  */
-int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t *p, uint8_t *c, uint8_t *n, size_t *plen, size_t clen)
+int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t **p, uint8_t *c, uint8_t *n, size_t **plen, size_t clen)
 {
     gcry_error_t err = GPG_ERR_NO_ERROR;
     size_t nlen = ctx->cipher->nonce_len;
     size_t tlen = ctx->cipher->tag_len;
-    uint8_t *len_buf = wmem_alloc0(wmem_file_scope(), 2 + tlen);
+    uint8_t *len_buf = (uint8_t *)wmem_alloc0(wmem_file_scope(), CHUNK_SIZE_LEN + tlen);
     size_t chunk_len;
-    uint8_t *n_copy = wmem_memdup(wmem_file_scope(), n, nlen);
+    uint8_t *n_copy = (uint8_t *)wmem_memdup(wmem_file_scope(), n, nlen);
+    uint8_t *tmp_p;
+    size_t tmp_plen;
+
+    if (*plen == NULL)
+        *plen = wmem_new0(wmem_file_scope(), size_t);
 
     if (clen <= 2 * tlen + CHUNK_SIZE_LEN)
         return RET_CRYPTO_NEED_MORE;
@@ -813,25 +820,26 @@ int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t *p, uint8_t *c, uint8_t *n, si
         return RET_CRYPTO_ERROR;
     }
     // NOTE: The `outsize` should always be expected length + tag length
-    err = gcry_cipher_decrypt(ctx->cipher->hd, len_buf, 2 + tlen, c, CHUNK_SIZE_LEN + tlen);
+    err = gcry_cipher_decrypt(ctx->cipher->hd, len_buf, CHUNK_SIZE_LEN + tlen, c, CHUNK_SIZE_LEN + tlen);
     if (err)
     {
         ws_critical("Failed to decrypt length: %s", gcry_strerror(err));
         return RET_CRYPTO_ERROR;
     }
 
-    if (plen == NULL)
-        plen = wmem_new0(wmem_file_scope(), size_t);
-    *plen = load16_be(len_buf);
-    *plen = *plen & CHUNK_SIZE_MASK;
+    /* Decode the length and pass it to `plen` */
+    tmp_plen = load16_be(len_buf);
+    wmem_free(wmem_file_scope(), len_buf);
+    tmp_plen = tmp_plen & CHUNK_SIZE_MASK;
+    **plen = tmp_plen;
 
-    if (*plen == 0)
+    if (tmp_plen == 0)
     {
-        ws_critical("Invalid message length decoded: %lu", *plen);
+        ws_critical("Invalid message length decoded: %lu", tmp_plen);
         return RET_CRYPTO_ERROR;
     }
 
-    chunk_len = 2 * tlen + CHUNK_SIZE_LEN + *plen;
+    chunk_len = 2 * tlen + CHUNK_SIZE_LEN + tmp_plen;
 
     if (clen < chunk_len)
     {
@@ -842,18 +850,25 @@ int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t *p, uint8_t *c, uint8_t *n, si
 
     /* Decrypt Content */
     err = gcry_cipher_setiv(ctx->cipher->hd, n_copy, nlen);
+    wmem_free(wmem_file_scope(), n_copy);
     if (err)
     {
         ws_critical("Failed to set IV: %s", gcry_strerror(err));
         return RET_CRYPTO_ERROR;
     }
-    err = gcry_cipher_decrypt(ctx->cipher->hd, p, *plen + tlen, c + CHUNK_SIZE_LEN + tlen, *plen + tlen);
+    tmp_p = (uint8_t *)wmem_alloc0(wmem_file_scope(), tmp_plen + tlen);
+    err = gcry_cipher_decrypt(ctx->cipher->hd, tmp_p, tmp_plen + tlen, c + CHUNK_SIZE_LEN + tlen, tmp_plen + tlen);
     if (err)
     {
         ws_critical("Failed to decrypt content: %s", gcry_strerror(err));
         return RET_CRYPTO_ERROR;
     }
-    sodium_increment(n_copy, nlen);
+
+    /* Pass the plaintext to `p` */
+    if (*p == NULL)
+        *p = (uint8_t *)wmem_alloc0(wmem_file_scope(), tmp_plen);
+    memcpy(*p, tmp_p, tmp_plen);
+    wmem_free(wmem_file_scope(), tmp_p);
 
     return RET_OK;
 }
@@ -924,7 +939,7 @@ gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx)
         return err;
     }
 
-    memset(cipher_ctx->nonce, 0, cipher_ctx->cipher->nonce_len);
+    // memset(cipher_ctx->nonce, 0, cipher_ctx->cipher->nonce_len);
 
     err = gcry_cipher_setkey(cipher_ctx->cipher->hd, cipher_ctx->skey, cipher_ctx->cipher->key_len);
     if (err)
@@ -1328,19 +1343,27 @@ int get_prev_pkt_type(wmem_list_frame_t *frame)
 /**
  * @brief Look up the nonce of the previous packet.
  *  Consider the case where the previous packet is fragmented.
+ * @param pinfo_num Packet number
+ * @param nonce Pointer to the nonce (output)
  */
-void get_nonce(uint32_t pinfo_num, uint8_t *nonce)
+void get_nonce(uint32_t pinfo_num, uint8_t **nonce)
 {
     uint32_t *pinfo_num_copy = wmem_memdup(wmem_file_scope(), &pinfo_num, sizeof(uint32_t));
     size_t nonce_len = ss_cipher_ctx->cipher->nonce_len;
     wmem_list_frame_t *cur_frame, *prev_frame;
     uint32_t *prev_pinfo_num;
-    uint8_t *prev_nonce, *nonce_copy;
+    uint8_t *prev_nonce;
+    uint8_t *nonce_copy;
 
-    nonce = (uint8_t *)wmem_map_lookup(nonce_map, pinfo_num_copy);
-    if (nonce != NULL)
+    if (*nonce == NULL)
+        *nonce = wmem_alloc0(wmem_file_scope(), nonce_len);
+
+    nonce_copy = (uint8_t *)wmem_map_lookup(nonce_map, pinfo_num_copy);
+    if (nonce_copy != NULL)
+    {
+        memcpy(*nonce, nonce_copy, nonce_len);
         return;
-    nonce = wmem_alloc0(wmem_file_scope(), nonce_len);
+    }
 
     cur_frame = wmem_list_find_custom(pkt_order_list, pinfo_num_copy, (GCompareFunc)cmp_list_frame_uint_data);
     if (cur_frame == NULL)
@@ -1361,22 +1384,24 @@ void get_nonce(uint32_t pinfo_num, uint8_t *nonce)
         /* If last nonce is found, return the incremented value */
         if (prev_nonce != NULL)
         {
-            memcpy(nonce, prev_nonce, ss_cipher_ctx->cipher->nonce_len);
-            sodium_increment(nonce, ss_cipher_ctx->cipher->nonce_len);
-            sodium_increment(nonce, ss_cipher_ctx->cipher->nonce_len);
-            /* Save the nonce for the current packet */
-            nonce_copy = wmem_memdup(wmem_file_scope(), nonce, nonce_len);
-            wmem_map_insert(nonce_map, pinfo_num_copy, nonce_copy);
-            return;
+            nonce_copy = wmem_memdup(wmem_file_scope(), prev_nonce, nonce_len);
+            sodium_increment(nonce_copy, nonce_len);
+            sodium_increment(nonce_copy, nonce_len);
+            break;
         }
         prev_frame = wmem_list_frame_prev(prev_frame);
     }
 
-    /* If no nonce is found, return the initial value */
-    memset(nonce, 0, ss_cipher_ctx->cipher->nonce_len);
+    /* If no nonce is found, set the nonce to zero */
+    if (prev_nonce == NULL)
+    {
+        nonce_copy = wmem_alloc0(wmem_file_scope(), nonce_len);
+        memset(nonce_copy, 0, nonce_len);
+    }
+
     /* Save the nonce for the current packet */
-    nonce_copy = wmem_memdup(wmem_file_scope(), nonce, nonce_len);
     wmem_map_insert(nonce_map, pinfo_num_copy, nonce_copy);
+    memcpy(*nonce, nonce_copy, nonce_len);
 }
 
 /********** Debugging **********/

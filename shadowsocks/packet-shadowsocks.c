@@ -418,12 +418,13 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
  *  +----------+
  *  | 16/24/32 |
  *  +----------+
- * @return packet type
  */
-void dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, void *data _U_)
+int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, void *data _U_)
 {
     /*** Protocol Tree ***/
     proto_tree_add_item(tree, hf_salt, tvb, 0, -1, ENC_NA);
+
+    return tvb_captured_length(tvb);
 }
 
 /**
@@ -443,9 +444,9 @@ void dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, vo
  *      - 0x04: IP V6 address. The DST.ADDR is a version-6 IP address, with a length of 16 octets
  *  DST.ADDR: desired destination address
  *  DST.PORT: desired destination port in network octet order
- * @return packet type
+ * @param reassembly_flag TRUE if the packet is reassembled, FALSE otherwise
  */
-void dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_, int reassembly_flag)
+int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_, int reassembly_flag)
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
@@ -505,9 +506,14 @@ void dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree
     }
     offset += host_len;
     proto_tree_add_item(tree, hf_dst_port, next_tvb, offset, 2, ENC_BIG_ENDIAN);
+
+    return tvb_captured_length(tvb);
 }
 
-void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag)
+/**
+ * @param reassembly_flag TRUE if the packet is reassembled, FALSE otherwise
+ */
+int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag)
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
@@ -535,15 +541,13 @@ void dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree 
     /*** New Tab ***/
     next_tvb = tvb_new_child_real_data(tvb, plaintext, *plen, *plen);
     add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Stream Data");
+
+    return tvb_captured_length(tvb);
 }
 
-/**
- * @brief Dissect fully reassembled messages.
- */
 int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
 {
-    // TODO: Implement
-    ws_message("[%u] Dissecting fully reassembled messages", pinfo->num);
+    // TODO
     return tvb_captured_length(tvb);
 }
 
@@ -592,8 +596,8 @@ unsigned get_ss_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void 
         return -1;
     }
 
-    // NOTE: encrypted payload length(2) | length tag(tlen) | encrypted payload(plen) | payload tag(tlen)
     /* Cast to unsigned */
+    // NOTE: encrypted payload length(2) | length tag(tlen) | encrypted payload(plen) | payload tag(tlen)
     return (unsigned)(CHUNK_SIZE_LEN + plen + 2 * tlen);
 }
 
@@ -1378,9 +1382,12 @@ int get_prev_pkt_type(wmem_list_frame_t *frame)
 
 /**
  * @brief Look up the nonce of the previous packet.
- *  Consider the case where the previous packet is fragmented.
+ *  If no previous nonce is found, return all-zero nonce.
+ *  If a previous nonce is found and the packet is reassembled, return the same nonce (because they are literally the same packet).
+ *  If a previous nonce is found and the packet is not reassembled, return the incremented nonce.
  * @param pinfo_num Packet number
  * @param nonce Pointer to the nonce (output)
+ * @param reassembly_flag Flag indicating whether the packet is reassembled
  */
 void get_nonce(uint32_t pinfo_num, uint8_t **nonce, int reassembly_flag)
 {

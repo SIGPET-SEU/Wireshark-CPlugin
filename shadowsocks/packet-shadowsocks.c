@@ -295,7 +295,8 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         return *cur_pkt_type;
 
     /* Get previous packet type */
-    wmem_list_frame_t *cur_list_frame = wmem_list_find_custom(pkt_order_list, pinfo_num_copy, (GCompareFunc)cmp_list_frame_uint_data); // NOTE: Don't use `wmem_list_find` for value comparison
+    // NOTE: Don't use `wmem_list_find` for value comparison
+    wmem_list_frame_t *cur_list_frame = wmem_list_find_custom(pkt_order_list, pinfo_num_copy, (GCompareFunc)cmp_list_frame_uint_data);
     if (cur_list_frame == NULL)
     { /* The first occurrence of the packet */
         wmem_list_append(pkt_order_list, pinfo_num_copy);
@@ -414,6 +415,8 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         break;
     case PKT_TYPE_RELAY_HEADER:
     case PKT_TYPE_RELAY_HEADER_REASSEMBLY:
+    case PKT_TYPE_SALT_WITH_STREAM_DATA:
+    case PKT_TYPE_SALT_WITH_STREAM_DATA_REASSEMBLY:
         /* Check if it is [STREAM DATA] */
         get_or_set_salt(*pinfo_num_copy, &cur_salt);
         get_nonce(*pinfo_num_copy, &cur_nonce, FALSE);
@@ -466,11 +469,6 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         /* [SALT & STREAM DATA] */
         ss_cipher_ctx->init = 2;
         return PKT_TYPE_SALT_WITH_STREAM_DATA;
-        break;
-    case PKT_TYPE_SALT_WITH_STREAM_DATA:
-    case PKT_TYPE_SALT_WITH_STREAM_DATA_REASSEMBLY:
-        // TODO
-        return PKT_TYPE_UNKNOWN;
         break;
     case PKT_TYPE_SALT_NEED_MORE:
         return PKT_TYPE_SALT_REASSEMBLY;
@@ -566,10 +564,15 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 
 int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
 {
-    // TODO: Determine which dissector should be called
     /* Call other dissectors */
-    dissector_handle_t http_handle = find_dissector("tls");
-    call_dissector(http_handle, tvb, pinfo, tree);
+    heur_dtbl_entry_t *heur_dtbl_entry;
+    heur_dissector_list_t heur_list = find_heur_dissector_list("tls");
+    if (!dissector_try_heuristic(heur_list, tvb, pinfo, tree, &heur_dtbl_entry, data))
+    {
+        // NOTE: I don't know why TLS cannot be dissected by heuristic dissector
+        dissector_handle_t tls_handle = find_dissector("tls");
+        call_dissector(tls_handle, tvb, pinfo, tree);
+    }
 
     return tvb_captured_length(tvb);
 }

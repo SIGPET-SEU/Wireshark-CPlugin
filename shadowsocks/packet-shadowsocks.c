@@ -127,6 +127,7 @@ static const int supported_aead_ciphers_tag_size[AEAD_CIPHER_NUM] = {
 /* Hash Tables (use pinfo->num as key) */
 static wmem_map_t *pkt_type_map;
 static wmem_map_t *nonce_map;
+static wmem_map_t *salt_map;
 // NOTE: `shadowsocks-libev` uses a bloom filter to store and check salts. Here a hash table is used instead.
 // NOTE AGAIN: Seems that it is used to avoid replay attacks only, so not necessary here?
 // static wmem_map_t *salts;
@@ -137,8 +138,7 @@ static wmem_list_t *pkt_order_list;
 // TODO: Gather the following vars into conv_data?
 ss_cipher_ctx_t *ss_cipher_ctx;
 ss_crypto_t *ss_crypto;
-ss_buffer_t *ss_buf;
-int ss_frag = 0;
+// ss_buffer_t *ss_buf;
 
 int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
@@ -146,6 +146,8 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     ss_conv_data_t *conv_data _U_;
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     int *cur_pkt_type;
+    // uint8_t *cur_salt = NULL;
+    // uint8_t *cur_nonce = NULL;
     proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
     proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
     tvbuff_t *decrypted_tvb;
@@ -156,8 +158,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
     /*** Type Detection ***/
     int tmp_pkt_type = detect_ss_pkt_type(tvb, pinfo->num);
-    cur_pkt_type = wmem_new0(wmem_file_scope(), int);
-    memcpy(cur_pkt_type, &tmp_pkt_type, sizeof(int));
+    cur_pkt_type = (int *)wmem_memdup(wmem_file_scope(), &tmp_pkt_type, sizeof(int));
     wmem_map_insert(pkt_type_map, pinfo_num_copy, cur_pkt_type);
 
     /*** Protocol Tree ***/
@@ -167,12 +168,14 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     cipher_ctx_ti = proto_tree_add_item(ss_tree, hf_cipher_ctx, tvb, 0, 0, ENC_NA);
     proto_item_set_text(cipher_ctx_ti, "Cipher Context");
     cipher_ctx_tree = proto_item_add_subtree(cipher_ctx_ti, ett_cipher_ctx);
-    if (ss_cipher_ctx->init)
-    {
-        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_salt, tvb, 0, 0, ss_cipher_ctx->salt, ss_cipher_ctx->cipher->key_len);
-        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, ss_cipher_ctx->skey, ss_cipher_ctx->cipher->key_len);
-        // proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, ss_cipher_ctx->nonce, ss_cipher_ctx->cipher->nonce_len);
-    }
+    // if (ss_cipher_ctx->init)
+    // {
+    //     get_or_set_salt(pinfo->num, &cur_salt);
+    //     get_nonce(pinfo->num, &cur_nonce, FALSE);
+    //     proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_salt, tvb, 0, 0, ss_cipher_ctx->salt, ss_cipher_ctx->cipher->key_len);
+    //     proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, ss_cipher_ctx->skey, ss_cipher_ctx->cipher->key_len);
+    //     proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, cur_nonce, ss_cipher_ctx->cipher->nonce_len);
+    // }
     /* Cipher */
     cipher_ctx_cipher_ti = proto_tree_add_item(cipher_ctx_tree, hf_cipher_ctx_cipher, tvb, 0, 0, ENC_NA);
     proto_item_set_text(cipher_ctx_cipher_ti, "Cipher");
@@ -204,44 +207,74 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         break;
     case PKT_TYPE_RELAY_HEADER:
         col_set_str(pinfo->cinfo, COL_INFO, "[Relay Header]");
-        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, ss_tree, data, FALSE);
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, FALSE);
         dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, data);
         break;
     case PKT_TYPE_STREAM_DATA:
-        col_set_str(pinfo->cinfo, COL_INFO, "[Data]");
-        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, ss_tree, data, FALSE);
+        col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data]");
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, FALSE);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
+        break;
+    case PKT_TYPE_SALT_WITH_STREAM_DATA:
+        col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data]");
+        tvbuff_t *salt_tvb = tvb_new_subset_length(tvb, 0, ss_cipher_ctx->cipher->key_len);
+        dissect_ss_salt(salt_tvb, pinfo, ss_tree, data);
+        tvbuff_t *stream_data_tvb = tvb_new_subset_remaining(tvb, ss_cipher_ctx->cipher->key_len);
+        decrypted_tvb = dissect_ss_encrypted_data(stream_data_tvb, pinfo, cipher_ctx_tree, data, FALSE);
         dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
         break;
     case PKT_TYPE_SALT_NEED_MORE:
+        // NOTE: NO TEST CASE
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt (Need More)]");
+        tcp_dissect_pdus(tvb, pinfo, ss_tree, TRUE, 0,
+                         get_ss_salt_pdu_len,
+                         dissect_ss_pdu, NULL);
         break;
     case PKT_TYPE_RELAY_HEADER_NEED_MORE:
+        // NOTE: NO TEST CASE
         col_set_str(pinfo->cinfo, COL_INFO, "[Relay Header (Need More)]");
         tcp_dissect_pdus(tvb, pinfo, ss_tree, TRUE,
                          CHUNK_SIZE_LEN + ss_cipher_ctx->cipher->tag_len,
-                         get_ss_pdu_len,
+                         get_ss_stream_data_pdu_len,
                          dissect_ss_pdu, NULL);
         break;
     case PKT_TYPE_STREAM_DATA_NEED_MORE:
-        col_set_str(pinfo->cinfo, COL_INFO, "[Data (Need More)]");
+        col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data (Need More)]");
         tcp_dissect_pdus(tvb, pinfo, ss_tree, TRUE,
                          CHUNK_SIZE_LEN + ss_cipher_ctx->cipher->tag_len,
-                         get_ss_pdu_len,
+                         get_ss_stream_data_pdu_len,
+                         dissect_ss_pdu, NULL);
+        break;
+    case PKT_TYPE_SALT_WITH_STREAM_DATA_NEED_MORE:
+        col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data (Need More)]");
+        tcp_dissect_pdus(tvb, pinfo, ss_tree, TRUE,
+                         ss_cipher_ctx->cipher->key_len + CHUNK_SIZE_LEN + ss_cipher_ctx->cipher->tag_len,
+                         get_ss_salt_with_stream_data_pdu_len,
                          dissect_ss_pdu, NULL);
         break;
     case PKT_TYPE_SALT_REASSEMBLY:
+        // NOTE: NO TEST CASE
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt (Reassembly)]");
-        // TODO
+        dissect_ss_salt(tvb, pinfo, ss_tree, data);
         break;
     case PKT_TYPE_RELAY_HEADER_REASSEMBLY:
+        // NOTE: NO TEST CASE
         col_set_str(pinfo->cinfo, COL_INFO, "[Relay Header (Reassembly)]");
-        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, ss_tree, data, TRUE);
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, TRUE);
         dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, data);
         break;
     case PKT_TYPE_STREAM_DATA_REASSEMBLY:
-        col_set_str(pinfo->cinfo, COL_INFO, "[Data (Reassembly)]");
-        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, ss_tree, data, TRUE);
+        col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data (Reassembly)]");
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, TRUE);
         dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
+        break;
+    case PKT_TYPE_SALT_WITH_STREAM_DATA_REASSEMBLY:
+        col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data (Reassembly)]");
+        salt_tvb = tvb_new_subset_length(tvb, 0, ss_cipher_ctx->cipher->key_len);
+        dissect_ss_salt(salt_tvb, pinfo, ss_tree, data);
+        // stream_data_tvb = tvb_new_subset_remaining(tvb, ss_cipher_ctx->cipher->key_len);
+        // decrypted_tvb = dissect_ss_encrypted_data(stream_data_tvb, pinfo, cipher_ctx_tree, data, FALSE);
+        // dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
         break;
     default:
         ws_critical("[%u] Unknown packet type: %d", pinfo->num, *cur_pkt_type);
@@ -257,6 +290,7 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &pinfo_num, sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
     int *cur_pkt_type, prev_pkt_type;
+    uint8_t *cur_salt = NULL;
     uint8_t *cur_nonce = NULL;
     uint8_t *plaintext = NULL;
     size_t *plen = NULL;
@@ -294,21 +328,23 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
             ws_message("[%u] Fragmented salt", pinfo_num);
             return PKT_TYPE_SALT_NEED_MORE;
         }
-        /* [SALT] */
         // NOTE: It cannot be distinguished from the case where the first packet is not salt, but happens to have the same length as the salt.
-        memcpy(ss_cipher_ctx->salt, tvb_get_ptr(tvb, 0, salt_len), salt_len);
+        cur_salt = (uint8_t *)wmem_memdup(wmem_file_scope(), tvb_get_ptr(tvb, 0, salt_len), salt_len);
+        get_or_set_salt(*pinfo_num_copy, &cur_salt);
         gcry_error_t err = ss_aead_cipher_ctx_set_key(ss_cipher_ctx);
         if (err)
         {
             ws_critical("[%u] Failed to set cipher key: %s", pinfo_num, gcry_strerror(err));
             return PKT_TYPE_ERROR;
         }
+        /* [SALT] */
         ss_cipher_ctx->init = 1;
         return PKT_TYPE_SALT;
         break;
     case PKT_TYPE_SALT:
     case PKT_TYPE_SALT_REASSEMBLY:
         /* Check if it is [RELAY HEADER] */
+        get_or_set_salt(*pinfo_num_copy, &cur_salt);
         get_nonce(*pinfo_num_copy, &cur_nonce, FALSE);
         /* Decryption */
         int ret = ss_aead_decrypt(ss_cipher_ctx,
@@ -384,10 +420,9 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         return PKT_TYPE_RELAY_HEADER;
         break;
     case PKT_TYPE_RELAY_HEADER:
-    case PKT_TYPE_STREAM_DATA:
     case PKT_TYPE_RELAY_HEADER_REASSEMBLY:
-    case PKT_TYPE_STREAM_DATA_REASSEMBLY:
         /* Check if it is [STREAM DATA] */
+        get_or_set_salt(*pinfo_num_copy, &cur_salt);
         get_nonce(*pinfo_num_copy, &cur_nonce, FALSE);
         /* Decryption */
         ret = ss_aead_decrypt(ss_cipher_ctx,
@@ -403,6 +438,47 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         /* [STREAM DATA] */
         return PKT_TYPE_STREAM_DATA;
         break;
+    case PKT_TYPE_STREAM_DATA:
+    case PKT_TYPE_STREAM_DATA_REASSEMBLY:
+        /* Check if it is [SALT & STREAM DATA] */
+        if (tvb_len < salt_len + 2 * ss_cipher_ctx->cipher->tag_len + CHUNK_SIZE_LEN)
+        { /* Might be fragmented */
+            ws_message("[%u] Fragmented salt with stream data", pinfo_num);
+            return PKT_TYPE_SALT_WITH_STREAM_DATA_NEED_MORE;
+        }
+        /* Check the salt part */
+        cur_salt = (uint8_t *)wmem_memdup(wmem_file_scope(), tvb_get_ptr(tvb, 0, salt_len), salt_len);
+        get_or_set_salt(*pinfo_num_copy, &cur_salt);
+        err = ss_aead_cipher_ctx_set_key(ss_cipher_ctx);
+        if (err)
+        {
+            ws_critical("[%u] Failed to set cipher key: %s", pinfo_num, gcry_strerror(err));
+            return PKT_TYPE_ERROR;
+        }
+        /* Check the stream data part */
+        /* Nonce should be set to all zero */
+        cur_nonce = (uint8_t *)wmem_alloc0(wmem_file_scope(), ss_cipher_ctx->cipher->nonce_len);
+        wmem_map_insert(nonce_map, pinfo_num_copy, cur_nonce);
+        /* Decryption */
+        ret = ss_aead_decrypt(ss_cipher_ctx,
+                              &plaintext,
+                              (uint8_t *)tvb_get_ptr(tvb, salt_len, tvb_len - salt_len),
+                              cur_nonce,
+                              &plen,
+                              (size_t)(tvb_len - salt_len));
+        if (ret == RET_CRYPTO_ERROR)
+            return PKT_TYPE_ERROR;
+        if (ret == RET_CRYPTO_NEED_MORE)
+            return PKT_TYPE_SALT_WITH_STREAM_DATA_NEED_MORE;
+        /* [SALT & STREAM DATA] */
+        ss_cipher_ctx->init = 2;
+        return PKT_TYPE_SALT_WITH_STREAM_DATA;
+        break;
+    case PKT_TYPE_SALT_WITH_STREAM_DATA:
+    case PKT_TYPE_SALT_WITH_STREAM_DATA_REASSEMBLY:
+        // TODO
+        return PKT_TYPE_UNKNOWN;
+        break;
     case PKT_TYPE_SALT_NEED_MORE:
         return PKT_TYPE_SALT_REASSEMBLY;
         break;
@@ -411,6 +487,9 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num)
         break;
     case PKT_TYPE_STREAM_DATA_NEED_MORE:
         return PKT_TYPE_STREAM_DATA_REASSEMBLY;
+        break;
+    case PKT_TYPE_SALT_WITH_STREAM_DATA_NEED_MORE:
+        return PKT_TYPE_SALT_WITH_STREAM_DATA_REASSEMBLY;
         break;
     default:
         ws_error("[%u] Unknown previous packet type: %d", pinfo_num, prev_pkt_type);
@@ -494,6 +573,11 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 
 int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
 {
+    //TODO: Determine which dissector should be called
+    /* Call other dissectors */
+    dissector_handle_t http_handle = find_dissector("tls");
+    call_dissector(http_handle, tvb, pinfo, tree);
+
     return tvb_captured_length(tvb);
 }
 
@@ -506,12 +590,14 @@ tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tre
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
+    uint8_t *cur_salt = NULL;
     uint8_t *cur_nonce = NULL;
     uint8_t *plaintext = NULL;
     size_t *plen = NULL;
     tvbuff_t *decrypted_tvb;
 
-    /*** Nonce ***/
+    /*** Salt & Nonce ***/
+    get_or_set_salt(*pinfo_num_copy, &cur_salt);
     get_nonce(*pinfo_num_copy, &cur_nonce, reassembly_flag);
 
     /*** Decryption ***/
@@ -539,23 +625,29 @@ int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, 
     return tvb_captured_length(tvb);
 }
 
-/**
- * @brief Determine PDU length of protocol Shadowsocks
- */
-unsigned get_ss_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_)
+unsigned get_ss_salt_pdu_len(packet_info *pinfo _U_, tvbuff_t *tvb _U_, int offset _U_, void *data _U_)
+{
+    /* Cast to unsigned */
+    // NOTE: The salt length is fixed
+    return (unsigned)ss_cipher_ctx->cipher->key_len;
+}
+
+unsigned get_ss_stream_data_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_)
 {
     gcry_error_t err = GPG_ERR_NO_ERROR;
+    uint8_t *cur_salt = NULL;
     uint8_t *cur_nonce = NULL;
     size_t nlen = ss_cipher_ctx->cipher->nonce_len;
     size_t tlen = ss_cipher_ctx->cipher->tag_len;
     uint8_t *len_buf = (uint8_t *)wmem_alloc0(wmem_file_scope(), CHUNK_SIZE_LEN + tlen);
     uint16_t plen;
 
-    /*** Nonce ***/
+    /*** Salt & Nonce ***/
+    get_or_set_salt(pinfo->num, &cur_salt);
     get_nonce(pinfo->num, &cur_nonce, FALSE);
 
     /* Decrypt Length */
-    if (tvb_captured_length(tvb) <= CHUNK_SIZE_LEN * tlen + CHUNK_SIZE_LEN)
+    if (tvb_captured_length(tvb) <= 2 * tlen + CHUNK_SIZE_LEN)
     {
         ws_critical("[%u] Not enough data to decrypt `plen`", pinfo->num);
         return 0;
@@ -587,6 +679,56 @@ unsigned get_ss_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void 
     /* Cast to unsigned */
     // NOTE: encrypted payload length(2) | length tag(tlen) | encrypted payload(plen) | payload tag(tlen)
     return (unsigned)(CHUNK_SIZE_LEN + plen + 2 * tlen);
+}
+
+unsigned get_ss_salt_with_stream_data_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_)
+{
+    gcry_error_t err = GPG_ERR_NO_ERROR;
+    uint8_t *cur_salt = NULL;
+    uint8_t *cur_nonce = NULL;
+    size_t slen = ss_cipher_ctx->cipher->key_len;
+    size_t nlen = ss_cipher_ctx->cipher->nonce_len;
+    size_t tlen = ss_cipher_ctx->cipher->tag_len;
+    uint8_t *len_buf = (uint8_t *)wmem_alloc0(wmem_file_scope(), CHUNK_SIZE_LEN + tlen);
+    uint16_t plen;
+
+    /*** Salt & Nonce ***/
+    get_or_set_salt(pinfo->num, &cur_salt);
+    get_nonce(pinfo->num, &cur_nonce, FALSE);
+
+    /* Decrypt Length */
+    if (tvb_captured_length(tvb) <= slen + 2 * tlen + CHUNK_SIZE_LEN)
+    {
+        ws_critical("[%u] Not enough data to decrypt `plen`", pinfo->num);
+        return 0;
+    }
+    err = gcry_cipher_setiv(ss_cipher_ctx->cipher->hd, cur_nonce, nlen);
+    if (err)
+    {
+        ws_critical("[%u] Failed to set IV: %s", pinfo->num, gcry_strerror(err));
+        return -1;
+    }
+    // NOTE: The `outsize` should always be expected length + tag length
+    err = gcry_cipher_decrypt(ss_cipher_ctx->cipher->hd, len_buf, CHUNK_SIZE_LEN + tlen, tvb_get_ptr(tvb, slen, CHUNK_SIZE_LEN + tlen), CHUNK_SIZE_LEN + tlen);
+    if (err)
+    {
+        ws_critical("[%u] Failed to decrypt length: %s", pinfo->num, gcry_strerror(err));
+        return -1;
+    }
+
+    plen = load16_be(len_buf);
+    wmem_free(wmem_file_scope(), len_buf);
+    plen = plen & CHUNK_SIZE_MASK;
+
+    if (plen == 0)
+    {
+        ws_critical("[%u] Invalid message length decoded: %d", pinfo->num, plen);
+        return -1;
+    }
+
+    /* Cast to unsigned */
+    // NOTE: salt(slen) | encrypted payload length(2) | length tag(tlen) | encrypted payload(plen) | payload tag(tlen)
+    return (unsigned)(slen + CHUNK_SIZE_LEN + tlen + plen + tlen);
 }
 
 /********** Registers **********/
@@ -758,14 +900,12 @@ void ss_init_routine(void)
 
     ss_cipher_ctx = wmem_new0(wmem_file_scope(), ss_cipher_ctx_t);
     ss_crypto->ctx_init(ss_crypto->cipher, ss_cipher_ctx);
-    ss_buf = wmem_new0(wmem_file_scope(), ss_buffer_t);
-    ss_balloc(ss_buf, BUF_SIZE);
-
-    ss_frag = 0;
+    // ss_buf = wmem_new0(wmem_file_scope(), ss_buffer_t);
+    // ss_balloc(ss_buf, BUF_SIZE);
 
     pkt_type_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
     nonce_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
-    // salts = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
+    salt_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
     pkt_order_list = wmem_list_new(wmem_file_scope());
 }
 
@@ -777,15 +917,15 @@ void ss_cleanup_routine(void)
         wmem_free(wmem_file_scope(), ss_cipher_ctx);
     }
 
-    if (ss_buf != NULL)
-    {
-        ss_bfree(ss_buf);
-        wmem_free(wmem_file_scope(), ss_buf);
-    }
+    // if (ss_buf != NULL)
+    // {
+    //     ss_bfree(ss_buf);
+    //     wmem_free(wmem_file_scope(), ss_buf);
+    // }
 
     wmem_free(wmem_file_scope(), pkt_type_map);
     wmem_free(wmem_file_scope(), nonce_map);
-    // wmem_free(wmem_file_scope(), salts);
+    wmem_free(wmem_file_scope(), salt_map);
     wmem_free(wmem_file_scope(), pkt_order_list);
 }
 
@@ -836,11 +976,21 @@ int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t **p, uint8_t *c, uint8_t *n, s
     uint8_t *tmp_p;
     size_t tmp_plen;
 
+    err = ss_aead_cipher_ctx_set_key(ss_cipher_ctx);
+    if (err)
+    {
+        ws_critical("Failed to set cipher key: %s", gcry_strerror(err));
+        return RET_CRYPTO_ERROR;
+    }
+
     if (*plen == NULL)
         *plen = wmem_new0(wmem_file_scope(), size_t);
 
     if (clen <= 2 * tlen + CHUNK_SIZE_LEN)
+    {
+        ws_message("clen(%lu) <= 2 * tlen(%lu) + CHUNK_SIZE_LEN(%d)", clen, 2 * tlen, CHUNK_SIZE_LEN);
         return RET_CRYPTO_NEED_MORE;
+    }
 
     /* Decrypt Length */
     err = gcry_cipher_setiv(ctx->cipher->hd, n_copy, nlen);
@@ -872,7 +1022,10 @@ int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t **p, uint8_t *c, uint8_t *n, s
     chunk_len = 2 * tlen + CHUNK_SIZE_LEN + tmp_plen;
 
     if (clen < chunk_len)
+    {
+        ws_message("clen(%lu) < 2 * tlen(%lu) + CHUNK_SIZE_LEN(%d) + tmp_plen(%lu)", clen, 2 * tlen, CHUNK_SIZE_LEN, tmp_plen);
         return RET_CRYPTO_NEED_MORE;
+    }
 
     sodium_increment(n_copy, nlen);
 
@@ -893,9 +1046,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t **p, uint8_t *c, uint8_t *n, s
     }
 
     /* Pass the plaintext to `p` */
-    if (*p == NULL)
-        *p = (uint8_t *)wmem_alloc0(wmem_file_scope(), tmp_plen);
-    memcpy(*p, tmp_p, tmp_plen);
+    *p = (uint8_t *)wmem_memdup(wmem_file_scope(), tmp_p, tmp_plen);
     wmem_free(wmem_file_scope(), tmp_p);
 
     return RET_OK;
@@ -1379,30 +1530,26 @@ int get_prev_pkt_type(wmem_list_frame_t *frame)
  */
 void get_nonce(uint32_t pinfo_num, uint8_t **nonce, int reassembly_flag)
 {
-    uint32_t *pinfo_num_copy = wmem_memdup(wmem_file_scope(), &pinfo_num, sizeof(uint32_t));
+    uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &pinfo_num, sizeof(uint32_t));
     size_t nonce_len = ss_cipher_ctx->cipher->nonce_len;
     wmem_list_frame_t *cur_frame, *prev_frame;
     uint32_t *prev_pinfo_num;
     uint8_t *prev_nonce;
     uint8_t *nonce_copy;
 
-    if (*nonce == NULL)
-        *nonce = wmem_alloc0(wmem_file_scope(), nonce_len);
-
     nonce_copy = (uint8_t *)wmem_map_lookup(nonce_map, pinfo_num_copy);
     if (nonce_copy != NULL)
     {
-        memcpy(*nonce, nonce_copy, nonce_len);
+        *nonce = (uint8_t *)wmem_memdup(wmem_file_scope(), nonce_copy, nonce_len);
         return;
     }
 
+    /* Search backward until a nonce is found or reach the head of the list */
     cur_frame = wmem_list_find_custom(pkt_order_list, pinfo_num_copy, (GCompareFunc)cmp_list_frame_uint_data);
     if (cur_frame == NULL)
         wmem_list_append(pkt_order_list, pinfo_num_copy);
     cur_frame = wmem_list_find_custom(pkt_order_list, pinfo_num_copy, (GCompareFunc)cmp_list_frame_uint_data);
     prev_frame = wmem_list_frame_prev(cur_frame);
-
-    /* Search backward until a nonce is found or reach the head of the list */
     while (prev_frame != NULL)
     {
         prev_pinfo_num = (uint32_t *)wmem_list_frame_data(prev_frame);
@@ -1435,10 +1582,75 @@ void get_nonce(uint32_t pinfo_num, uint8_t **nonce, int reassembly_flag)
     }
 
     /* Save the nonce for the current packet */
+    *nonce = (uint8_t *)wmem_memdup(wmem_file_scope(), nonce_copy, nonce_len);
     wmem_map_insert(nonce_map, pinfo_num_copy, nonce_copy);
-    memcpy(*nonce, nonce_copy, nonce_len);
 }
 
+/**
+ * @brief Pass `NULL` to get the salt same as the previous packet.
+ *  Otherwise, insert the given salt into the map.
+ * @param pinfo_num Packet number
+ * @param salt Pointer to the salt
+ */
+void get_or_set_salt(uint32_t pinfo_num, uint8_t **salt)
+{
+    uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &pinfo_num, sizeof(uint32_t));
+    size_t salt_len = ss_cipher_ctx->cipher->key_len;
+    wmem_list_frame_t *cur_frame, *prev_frame;
+    uint32_t *prev_pinfo_num;
+    uint8_t *prev_salt;
+    uint8_t *salt_copy;
+
+    /* Insert the given salt into the map if it is not NULL */
+    if (*salt != NULL)
+    {
+        wmem_map_insert(salt_map, pinfo_num_copy, *salt);
+        memcpy(ss_cipher_ctx->salt, *salt, salt_len);
+        return;
+    }
+
+    /* Return the salt if it is found */
+    salt_copy = (uint8_t *)wmem_map_lookup(salt_map, pinfo_num_copy);
+    if (salt_copy != NULL)
+    {
+        *salt = (uint8_t *)wmem_memdup(wmem_file_scope(), salt_copy, salt_len);
+        memcpy(ss_cipher_ctx->salt, salt_copy, salt_len);
+        return;
+    }
+
+    /* Search backward until a salt is found or reach the head of the list */
+    cur_frame = wmem_list_find_custom(pkt_order_list, pinfo_num_copy, (GCompareFunc)cmp_list_frame_uint_data);
+    if (cur_frame == NULL)
+        wmem_list_append(pkt_order_list, pinfo_num_copy);
+    cur_frame = wmem_list_find_custom(pkt_order_list, pinfo_num_copy, (GCompareFunc)cmp_list_frame_uint_data);
+    prev_frame = wmem_list_frame_prev(cur_frame);
+    while (prev_frame != NULL)
+    {
+        prev_pinfo_num = (uint32_t *)wmem_list_frame_data(prev_frame);
+        if (prev_pinfo_num == NULL)
+        {
+            ws_error("`prev_pinfo_num` is NULL");
+            exit(-1);
+        }
+        prev_salt = (uint8_t *)wmem_map_lookup(salt_map, prev_pinfo_num);
+        /* Return the same value if last salt is found */
+        if (prev_salt != NULL)
+        {
+            salt_copy = wmem_memdup(wmem_file_scope(), prev_salt, salt_len);
+            break;
+        }
+        prev_frame = wmem_list_frame_prev(prev_frame);
+    }
+
+    /* Use `ss_cipher_ctx->salt` if no previous salt is found */
+    if (prev_salt == NULL)
+        salt_copy = wmem_memdup(wmem_file_scope(), ss_cipher_ctx->salt, salt_len);
+
+    /* Save the salt for the current packet */
+    wmem_map_insert(salt_map, pinfo_num_copy, salt_copy);
+    *salt = (uint8_t *)wmem_memdup(wmem_file_scope(), salt_copy, salt_len);
+    memcpy(ss_cipher_ctx->salt, salt_copy, salt_len);
+}
 /********** Debugging **********/
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data _U_)
 {
@@ -1484,6 +1696,7 @@ void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_n
     {
         printf("%02x", array[i]);
     }
+    printf("\n");
 }
 
 void debug_print_tvb(tvbuff_t *tvb, const char *var_name)

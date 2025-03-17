@@ -32,6 +32,9 @@
 
 #include "packet-shadowsocks.h"
 
+/********** Logging Domain **********/
+#define WS_LOG_DOMAIN "packet-shadowsocks"
+
 /********** Protocol Handles **********/
 static int proto_ss;
 
@@ -146,8 +149,6 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     ss_conv_data_t *conv_data _U_;
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     int *cur_pkt_type;
-    // uint8_t *cur_salt = NULL;
-    // uint8_t *cur_nonce = NULL;
     proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
     proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
     tvbuff_t *decrypted_tvb;
@@ -168,14 +169,6 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     cipher_ctx_ti = proto_tree_add_item(ss_tree, hf_cipher_ctx, tvb, 0, 0, ENC_NA);
     proto_item_set_text(cipher_ctx_ti, "Cipher Context");
     cipher_ctx_tree = proto_item_add_subtree(cipher_ctx_ti, ett_cipher_ctx);
-    // if (ss_cipher_ctx->init)
-    // {
-    //     get_or_set_salt(pinfo->num, &cur_salt);
-    //     get_nonce(pinfo->num, &cur_nonce, FALSE);
-    //     proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_salt, tvb, 0, 0, ss_cipher_ctx->salt, ss_cipher_ctx->cipher->key_len);
-    //     proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, ss_cipher_ctx->skey, ss_cipher_ctx->cipher->key_len);
-    //     proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, cur_nonce, ss_cipher_ctx->cipher->nonce_len);
-    // }
     /* Cipher */
     cipher_ctx_cipher_ti = proto_tree_add_item(cipher_ctx_tree, hf_cipher_ctx_cipher, tvb, 0, 0, ENC_NA);
     proto_item_set_text(cipher_ctx_cipher_ti, "Cipher");
@@ -272,9 +265,9 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data (Reassembly)]");
         salt_tvb = tvb_new_subset_length(tvb, 0, ss_cipher_ctx->cipher->key_len);
         dissect_ss_salt(salt_tvb, pinfo, ss_tree, data);
-        // stream_data_tvb = tvb_new_subset_remaining(tvb, ss_cipher_ctx->cipher->key_len);
-        // decrypted_tvb = dissect_ss_encrypted_data(stream_data_tvb, pinfo, cipher_ctx_tree, data, FALSE);
-        // dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
+        stream_data_tvb = tvb_new_subset_remaining(tvb, ss_cipher_ctx->cipher->key_len);
+        decrypted_tvb = dissect_ss_encrypted_data(stream_data_tvb, pinfo, cipher_ctx_tree, data, TRUE);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
         break;
     default:
         ws_critical("[%u] Unknown packet type: %d", pinfo->num, *cur_pkt_type);
@@ -573,7 +566,7 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 
 int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
 {
-    //TODO: Determine which dissector should be called
+    // TODO: Determine which dissector should be called
     /* Call other dissectors */
     dissector_handle_t http_handle = find_dissector("tls");
     call_dissector(http_handle, tvb, pinfo, tree);
@@ -586,7 +579,7 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tr
  * @param reassembly_flag TRUE if the packet is reassembled, FALSE otherwise
  * @return The decrypted tvb
  */
-tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag)
+tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_, int reassembly_flag)
 {
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
@@ -599,6 +592,10 @@ tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tre
     /*** Salt & Nonce ***/
     get_or_set_salt(*pinfo_num_copy, &cur_salt);
     get_nonce(*pinfo_num_copy, &cur_nonce, reassembly_flag);
+
+    /*** Protocol Tree ***/
+    proto_tree_add_bytes_with_length(tree, hf_cipher_ctx_salt, tvb, 0, 0, cur_salt, ss_cipher_ctx->cipher->key_len);
+    proto_tree_add_bytes_with_length(tree, hf_cipher_ctx_nonce, tvb, 0, 0, cur_nonce, ss_cipher_ctx->cipher->nonce_len);
 
     /*** Decryption ***/
     int ret = ss_aead_decrypt(ss_cipher_ctx,
@@ -1651,62 +1648,105 @@ void get_or_set_salt(uint32_t pinfo_num, uint8_t **salt)
     *salt = (uint8_t *)wmem_memdup(wmem_file_scope(), salt_copy, salt_len);
     memcpy(ss_cipher_ctx->salt, salt_copy, salt_len);
 }
+
 /********** Debugging **********/
-void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data _U_)
+void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data)
 {
-    printf("  - %u: %d\n", *(uint32_t *)key, *(int *)value);
+    char *buf = (char *)user_data;
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "  - %u: %d\n", *(uint32_t *)key, *(int *)value);
+    strcat(buf, tmp);
 }
 
-void debug_print_uint_key_uint_value(const void *key, const void *value, void *user_data _U_)
+void debug_print_uint_key_uint_value(const void *key, const void *value, void *user_data)
 {
-    printf("  - %u: %u\n", *(uint32_t *)key, *(uint32_t *)value);
+    char *buf = (char *)user_data;
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "  - %u: %u\n", *(uint32_t *)key, *(uint32_t *)value);
+    strcat(buf, tmp);
 }
 
-void debug_print_uint_key_uint8_array_value(const void *key, const void *value, void *user_data _U_)
+void debug_print_uint_key_uint8_array_value(const void *key, const void *value, void *user_data)
 {
-    printf("  - %u: ", *(uint32_t *)key);
+    char *buf = (char *)user_data;
+    char tmp[128];
+    int offset = snprintf(tmp, sizeof(tmp), "  - %u: ", *(uint32_t *)key);
+
     for (size_t i = 0; i < 16; i++)
     {
-        printf("%02x", ((uint8_t *)value)[i]);
+        offset += snprintf(tmp + offset, sizeof(tmp) - offset, "%02x", ((uint8_t *)value)[i]);
     }
-    printf("\n");
+
+    snprintf(tmp + offset, sizeof(tmp) - offset, "\n");
+    strcat(buf, tmp);
 }
 
 void debug_print_hash_map(wmem_map_t *hash_map, const char *var_name, PrintFunc print_func)
 {
-    printf("[DEBUG] %s:\n", var_name);
-    wmem_map_foreach(hash_map, (GHFunc)print_func, NULL);
+    char buf[4096] = {0};
+    char header[128];
+
+    snprintf(header, sizeof(header), "[DEBUG] %s:\n", var_name);
+    strcat(buf, header);
+
+    wmem_map_foreach(hash_map, (GHFunc)print_func, buf);
+
+    ws_message("%s", buf);
 }
 
 void debug_print_list(wmem_list_t *list, const char *var_name)
 {
-    printf("[DEBUG] %s: HEAD - ", var_name);
+    char buf[4096] = {0};
+    char tmp[64];
+
+    snprintf(tmp, sizeof(tmp), "[DEBUG] %s: HEAD - ", var_name);
+    strcat(buf, tmp);
+
     wmem_list_frame_t *frame;
     for (frame = wmem_list_head(list); frame != NULL; frame = wmem_list_frame_next(frame))
     {
-        printf("%u - ", *(uint32_t *)wmem_list_frame_data(frame));
+        snprintf(tmp, sizeof(tmp), "%u - ", *(uint32_t *)wmem_list_frame_data(frame));
+        strcat(buf, tmp);
     }
-    printf("TAIL\n");
+
+    strcat(buf, "TAIL\n");
+    ws_message("%s", buf);
 }
 
 void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_name)
 {
-    printf("[DEBUG] %s: ", var_name);
+    char buf[4096] = {0};
+    char tmp[64];
+
+    snprintf(tmp, sizeof(tmp), "[DEBUG] %s: ", var_name);
+    strcat(buf, tmp);
+
     for (size_t i = 0; i < len; i++)
     {
-        printf("%02x", array[i]);
+        snprintf(tmp, sizeof(tmp), "%02x", array[i]);
+        strcat(buf, tmp);
     }
-    printf("\n");
+
+    strcat(buf, "\n");
+    ws_message("%s", buf);
 }
 
 void debug_print_tvb(tvbuff_t *tvb, const char *var_name)
 {
-    printf("[DEBUG] %s: ", var_name);
+    char buf[4096] = {0};
+    char tmp[64];
+
+    snprintf(tmp, sizeof(tmp), "[DEBUG] %s: ", var_name);
+    strcat(buf, tmp);
+
     for (size_t i = 0; i < tvb_captured_length(tvb); i++)
     {
-        printf("%02x", tvb_get_uint8(tvb, i));
+        snprintf(tmp, sizeof(tmp), "%02x", tvb_get_uint8(tvb, i));
+        strcat(buf, tmp);
     }
-    printf("\n");
+
+    strcat(buf, "\n");
+    ws_message("%s", buf);
 }
 
 /*

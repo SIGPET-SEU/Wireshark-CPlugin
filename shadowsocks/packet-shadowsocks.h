@@ -138,7 +138,7 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num);
 int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, void *data _U_);
 int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_);
-tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_, int reassembly_flag);
+tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_, int reassembly_flag);
 int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_);
 unsigned get_ss_salt_pdu_len(packet_info *pinfo _U_, tvbuff_t *tvb _U_, int offset _U_, void *data _U_);
 unsigned get_ss_stream_data_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_);

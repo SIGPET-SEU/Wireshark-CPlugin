@@ -139,16 +139,20 @@ typedef struct ss_conv_data
     wmem_map_t *pkt_type_map; // value: int
     wmem_map_t *nonce_map;    // value: uint8_t array
     wmem_map_t *salts;        // NOTE: `shadowsocks-libev` uses a bloom filter to store and check salts. Here a hash table is used instead.
+
+    streaming_reassembly_info_t *reassembly_info;
 } ss_conv_data_t;
+
+typedef int ss_pkt_type_t;
 
 typedef void (*PrintFunc)(const void *key, const void *value, void *user_data);
 
 /********** Function Prototypes **********/
 /* Dissectors */
-int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num, ss_conv_data_t *conv_data, bool is_request);
+ss_pkt_type_t detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num, ss_conv_data_t *conv_data, bool is_request);
 int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, void *data _U_);
 int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
-int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_);
+int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, proto_tree *ss_tree, ss_conv_data_t *conv_data);
 tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_, ss_conv_data_t *conv_data, bool is_request, bool reassembly_flag);
 int dissect_ss_pdu(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_);
 unsigned get_ss_salt_pdu_len(packet_info *pinfo _U_, tvbuff_t *tvb _U_, int offset _U_, void *data _U_);
@@ -178,7 +182,7 @@ uint16_t load16_be(const void *s);
 void sodium_increment(unsigned char *n, const size_t nlen);
 int validate_hostname(const char *hostname, const int hostname_len);
 int cmp_list_frame_uint_data(const void *a, const void *b);
-int get_prev_pkt_type(wmem_list_frame_t *frame, wmem_map_t *pkt_type_map);
+ss_pkt_type_t get_prev_pkt_type(wmem_list_frame_t *frame, wmem_map_t *pkt_type_map);
 void get_nonce(uint32_t pinfo_num, uint8_t **nonce, wmem_list_t *pkt_order_list, wmem_map_t *nonce_map, bool reassembly_flag);
 /* Debugging */
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data);

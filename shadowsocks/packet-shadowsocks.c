@@ -42,6 +42,7 @@ static int proto_ss;
 static dissector_handle_t ss_handle;
 
 /********** Header Fields **********/
+/* Shadowsocks */
 /* Cipher Context */
 static int hf_cipher_ctx;
 static int hf_cipher_ctx_salt;
@@ -54,13 +55,28 @@ static int hf_cipher_ctx_cipher_key;
 static int hf_cipher_ctx_cipher_nonce_len;
 static int hf_cipher_ctx_cipher_key_len;
 static int hf_cipher_ctx_cipher_tag_len;
+/* Salt */
 static int hf_salt;
+/* Relay Header */
 static int hf_atyp;
 static int hf_dst_addr_ipv4;
 static int hf_dst_addr_domainname_len;
 static int hf_dst_addr_domainname;
 static int hf_dst_addr_ipv6;
 static int hf_dst_port;
+/* Reassembly Info */
+static int hf_msg_fragments;
+static int hf_msg_fragment;
+static int hf_msg_fragment_overlap;
+static int hf_msg_fragment_overlap_conflicts;
+static int hf_msg_fragment_multiple_tails;
+static int hf_msg_fragment_too_long_fragment;
+static int hf_msg_fragment_error;
+static int hf_msg_fragment_count;
+static int hf_msg_reassembled_in;
+static int hf_msg_reassembled_length;
+static int hf_msg_reassembled_data;
+static int hf_msg_body_segment;
 
 static const value_string hf_cipher_ctx_cipher_method_vals[] = {
     {AEAD_CIPHER_AES128GCM, "aes-128-gcm"},
@@ -80,9 +96,31 @@ static const value_string hf_atyp_vals[] = {
 };
 
 /********** Subtree Pointers **********/
+/* Shadowsocks */
 static int ett_ss;
 static int ett_cipher_ctx;
 static int ett_cipher_ctx_cipher;
+/* Reassembly Info */
+static int ett_msg_fragment;
+static int ett_msg_fragments;
+
+/********** Fragment Items **********/
+static const fragment_items msg_frag_items = {
+    &ett_msg_fragment,
+    &ett_msg_fragments,
+    &hf_msg_fragments,
+    &hf_msg_fragment,
+    &hf_msg_fragment_overlap,
+    &hf_msg_fragment_overlap_conflicts,
+    &hf_msg_fragment_multiple_tails,
+    &hf_msg_fragment_too_long_fragment,
+    &hf_msg_fragment_error,
+    &hf_msg_fragment_count,
+    &hf_msg_reassembled_in,
+    &hf_msg_reassembled_length,
+    &hf_msg_reassembled_data,
+    "Shadowsocks Message fragments",
+};
 
 /********** Preferences **********/
 static const char *pref_password = "";
@@ -128,6 +166,7 @@ static const int supported_aead_ciphers_tag_size[AEAD_CIPHER_NUM] = {
 #endif
 };
 
+static reassembly_table proto_ss_streaming_reassembly_table;
 ss_crypto_t *ss_crypto;
 // ss_buffer_t *ss_buf;
 
@@ -136,8 +175,8 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &(pinfo->num), sizeof(uint32_t));
-    int tmp_pkt_type;
-    int *cur_pkt_type;
+    ss_pkt_type_t tmp_pkt_type;
+    ss_pkt_type_t *cur_pkt_type;
     proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
     proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
     bool is_request = true;
@@ -157,7 +196,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
     /*** Type Detection ***/
     tmp_pkt_type = detect_ss_pkt_type(tvb, pinfo->num, conv_data, is_request);
-    cur_pkt_type = (int *)wmem_memdup(wmem_file_scope(), &tmp_pkt_type, sizeof(int));
+    cur_pkt_type = (ss_pkt_type_t *)wmem_memdup(wmem_file_scope(), &tmp_pkt_type, sizeof(ss_pkt_type_t));
     wmem_map_insert(conv_data->pkt_type_map, pinfo_num_copy, cur_pkt_type);
 
     /*** Protocol Tree ***/
@@ -204,7 +243,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     case PKT_TYPE_STREAM_DATA:
         col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data]");
         decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, conv_data, is_request, false);
-        dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, conv_data);
         break;
     case PKT_TYPE_SALT_WITH_STREAM_DATA:
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data]");
@@ -212,7 +251,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         dissect_ss_salt(salt_tvb, pinfo, ss_tree, data);
         tvbuff_t *stream_data_tvb = tvb_new_subset_remaining(tvb, ss_crypto->cipher->key_len);
         decrypted_tvb = dissect_ss_encrypted_data(stream_data_tvb, pinfo, cipher_ctx_tree, data, conv_data, is_request, false);
-        dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, conv_data);
         break;
     case PKT_TYPE_SALT_NEED_MORE:
         // NOTE: NO TEST CASE
@@ -257,7 +296,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     case PKT_TYPE_STREAM_DATA_REASSEMBLY:
         col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data (Reassembly)]");
         decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, conv_data, is_request, true);
-        dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, conv_data);
         break;
     case PKT_TYPE_SALT_WITH_STREAM_DATA_REASSEMBLY:
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data (Reassembly)]");
@@ -265,7 +304,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         dissect_ss_salt(salt_tvb, pinfo, ss_tree, data);
         stream_data_tvb = tvb_new_subset_remaining(tvb, ss_crypto->cipher->key_len);
         decrypted_tvb = dissect_ss_encrypted_data(stream_data_tvb, pinfo, cipher_ctx_tree, data, conv_data, is_request, true);
-        dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, data);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, conv_data);
         break;
     default:
         ws_critical("[%u] Unknown packet type: %d", pinfo->num, *cur_pkt_type);
@@ -276,12 +315,12 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 }
 
 /********** Dissectors **********/
-int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num, ss_conv_data_t *conv_data, bool is_request)
+ss_pkt_type_t detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num, ss_conv_data_t *conv_data, bool is_request)
 {
     gcry_error_t err = GPG_ERR_NO_ERROR;
     uint32_t *pinfo_num_copy = (uint32_t *)wmem_memdup(wmem_file_scope(), &pinfo_num, sizeof(uint32_t));
     uint32_t tvb_len = tvb_captured_length(tvb);
-    int *cur_pkt_type, prev_pkt_type;
+    ss_pkt_type_t *cur_pkt_type, prev_pkt_type;
     uint8_t *cur_nonce = NULL;
     uint8_t *plaintext = NULL;
     size_t *plen = NULL;
@@ -292,7 +331,7 @@ int detect_ss_pkt_type(tvbuff_t *tvb, uint32_t pinfo_num, ss_conv_data_t *conv_d
     size_t salt_len = cipher_ctx->cipher->key_len;
 
     /* Try to get the packet type from the hash table */
-    cur_pkt_type = (int *)wmem_map_lookup(pkt_type_map, pinfo_num_copy);
+    cur_pkt_type = (ss_pkt_type_t *)wmem_map_lookup(pkt_type_map, pinfo_num_copy);
     if (cur_pkt_type != NULL)
         return *cur_pkt_type;
 
@@ -591,17 +630,23 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     return tvb_captured_length(tvb);
 }
 
-int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree _U_, void *data _U_)
+int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, proto_tree *ss_tree, ss_conv_data_t *conv_data)
 {
-    /* Call other dissectors */
-    heur_dtbl_entry_t *heur_dtbl_entry;
-    heur_dissector_list_t heur_list = find_heur_dissector_list("tls");
-    if (!dissector_try_heuristic(heur_list, tvb, pinfo, tree, &heur_dtbl_entry, data))
-    {
-        // NOTE: I don't know why TLS cannot be dissected by heuristic dissector
-        dissector_handle_t tls_handle = find_dissector("tls");
-        call_dissector(tls_handle, tvb, pinfo, tree);
-    }
+    /* Call upper dissectors */
+    dissector_handle_t tls_handle = find_dissector("tls");
+    reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
+                                                    tvb_captured_length_remaining(tvb, 0),
+                                                    ss_tree, tree,
+                                                    proto_ss_streaming_reassembly_table,
+                                                    conv_data->reassembly_info,
+                                                    get_virtual_frame_num64(tvb, pinfo, 0),
+                                                    tls_handle,
+                                                    proto_tree_get_parent_tree(tree),
+                                                    NULL,
+                                                    "Shadowsocks",
+                                                    &msg_frag_items, hf_msg_body_segment);
+    dissector_handle_t http_handle = find_dissector("http");
+    call_dissector(http_handle, tvb, pinfo, tree);
 
     return tvb_captured_length(tvb);
 }
@@ -642,14 +687,14 @@ tvbuff_t *dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tre
     if (ret != RET_OK)
     { /* Set the packet type to [ERROR] */
         ws_critical("[%u] Failed to decrypt", pinfo->num);
-        int *tmp_pkt_type = wmem_map_lookup(conv_data->pkt_type_map, pinfo_num_copy);
+        ss_pkt_type_t *tmp_pkt_type = wmem_map_lookup(conv_data->pkt_type_map, pinfo_num_copy);
         *tmp_pkt_type = PKT_TYPE_ERROR;
         return tvb_new_child_real_data(tvb, NULL, 0, 0);
     }
 
     /*** New Tab ***/
     decrypted_tvb = tvb_new_child_real_data(tvb, plaintext, *plen, *plen);
-    add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks");
+    add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks Data");
     return decrypted_tvb;
 }
 
@@ -800,123 +845,174 @@ void proto_register_ss(void)
 
     /*** Header Fields ***/
     static hf_register_info hf[] = {
+        /* Cipher Context */
         {&hf_cipher_ctx,
          {"Cipher Context",
           "shadowsocks.cipher_ctx",
-          FT_NONE,
-          BASE_NONE,
+          FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_salt,
          {"Salt",
           "shadowsocks.cipher_ctx.salt",
-          FT_BYTES,
-          BASE_NONE,
+          FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_skey,
          {"Subkey",
           "shadowsocks.cipher_ctx.skey",
-          FT_BYTES,
-          BASE_NONE,
+          FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_nonce,
          {"Nonce",
           "shadowsocks.cipher_ctx.nonce",
-          FT_BYTES,
-          BASE_NONE,
+          FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher,
          {"Cipher",
           "shadowsocks.cipher_ctx.cipher",
-          FT_NONE,
-          BASE_NONE,
+          FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher_method,
          {"Method",
           "shadowsocks.cipher_ctx.cipher.method",
-          FT_INT8,
-          BASE_DEC,
+          FT_INT8, BASE_DEC,
           VALS(hf_cipher_ctx_cipher_method_vals), 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher_password,
          {"Password",
           "shadowsocks.cipher_ctx.cipher.password",
-          FT_STRING,
-          BASE_NONE,
+          FT_STRING, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher_key,
          {"Key",
           "shadowsocks.cipher_ctx.cipher.key",
-          FT_BYTES,
-          BASE_NONE,
+          FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher_nonce_len,
          {"Nonce Length",
           "shadowsocks.cipher_ctx.cipher.nonce_len",
-          FT_UINT8,
-          BASE_DEC,
+          FT_UINT8, BASE_DEC,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher_key_len,
          {"Key Length",
           "shadowsocks.cipher_ctx.cipher.key_len",
-          FT_UINT8,
-          BASE_DEC,
+          FT_UINT8, BASE_DEC,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher_tag_len,
          {"Tag Length",
           "shadowsocks.cipher_ctx.cipher.tag_len",
-          FT_UINT8,
-          BASE_DEC,
+          FT_UINT8, BASE_DEC,
           NULL, 0x0, NULL, HFILL}},
+        /* Salt */
         {&hf_salt,
          {"Salt",
           "shadowsocks.salt",
-          FT_BYTES,
-          BASE_NONE,
+          FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
+        /* Relay Header */
         {&hf_atyp,
          {"Address Type",
           "shadowsocks.atyp",
-          FT_UINT8,
-          BASE_DEC,
+          FT_UINT8, BASE_DEC,
           VALS(hf_atyp_vals), 0x0, NULL, HFILL}},
         {&hf_dst_addr_ipv4,
          {"IPv4 Address",
           "shadowsocks.dst_addr.ipv4",
-          FT_IPv4,
-          BASE_NONE,
+          FT_IPv4, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_dst_addr_domainname_len,
          {"Domain Name Length",
           "shadowsocks.dst_addr.domainname_len",
-          FT_UINT8,
-          BASE_DEC,
+          FT_UINT8, BASE_DEC,
           NULL, 0x0, NULL, HFILL}},
         {&hf_dst_addr_domainname,
          {"Domain Name",
           "shadowsocks.dst_addr.domainname",
-          FT_STRING,
-          BASE_NONE,
+          FT_STRING, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_dst_addr_ipv6,
          {"IPv6 Address",
           "shadowsocks.dst_addr.ipv6",
-          FT_IPv6,
-          BASE_NONE,
+          FT_IPv6, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_dst_port,
          {"Destination Port",
           "shadowsocks.dst_port",
-          FT_UINT16,
-          BASE_DEC,
+          FT_UINT16, BASE_DEC,
           NULL, 0x0, NULL, HFILL}},
+        /* Reassembly Info */
+        {&hf_msg_fragments,
+         {"Reassembled Shadowsocks Message fragments",
+          "shadowsocks.msg.fragments",
+          FT_NONE, BASE_NONE,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_fragment,
+         {"Message fragment",
+          "shadowsocks.msg.fragment",
+          FT_FRAMENUM, BASE_NONE,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_fragment_overlap,
+         {"Message fragment overlap",
+          "shadowsocks.msg.fragment.overlap",
+          FT_BOOLEAN, 0,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_fragment_overlap_conflicts,
+         {"Message fragment overlapping with conflicting data",
+          "shadowsocks.msg.fragment.overlap.conflicts",
+          FT_BOOLEAN, 0,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_fragment_multiple_tails,
+         {"Message has multiple tail fragments",
+          "shadowsocks.msg.fragment.multiple_tails",
+          FT_BOOLEAN, 0,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_fragment_too_long_fragment,
+         {"Message fragment too long",
+          "shadowsocks.msg.fragment.too_long_fragment",
+          FT_BOOLEAN, 0,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_fragment_error,
+         {"Message defragmentation error",
+          "shadowsocks.msg.fragment.error",
+          FT_FRAMENUM, BASE_NONE,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_fragment_count,
+         {"Message fragment count",
+          "shadowsocks.msg.fragment.count",
+          FT_UINT32, BASE_DEC,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_reassembled_in,
+         {"Reassembled in",
+          "shadowsocks.msg.reassembled.in",
+          FT_FRAMENUM, BASE_NONE,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_reassembled_length,
+         {"Reassembled length",
+          "shadowsocks.msg.reassembled.length",
+          FT_UINT32, BASE_DEC,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_reassembled_data,
+         {"Reassembled data",
+          "shadowsocks.msg.reassembled.data",
+          FT_BYTES, BASE_NONE,
+          NULL, 0x00, NULL, HFILL}},
+        {&hf_msg_body_segment,
+         {"Shadowsocks body segment",
+          "shadowsocks.msg.body.segment",
+          FT_BYTES, BASE_NONE,
+          NULL, 0x00, NULL, HFILL}},
     };
     /* Subtree Arrays */
     static int *ett[] = {
         &ett_ss,
         &ett_cipher_ctx,
-        &ett_cipher_ctx_cipher};
+        &ett_cipher_ctx_cipher,
+        &ett_msg_fragment,
+        &ett_msg_fragments,
+    };
     /* Register */
     proto_register_field_array(proto_ss, hf, array_length(hf));
     proto_register_subtree_array(ett, array_length(ett));
+    reassembly_table_register(&proto_ss_streaming_reassembly_table,
+                              &addresses_ports_reassembly_table_functions);
 
     /*** Preferences ***/
     ss_module = prefs_register_protocol(proto_ss, proto_reg_handoff_ss);
@@ -992,6 +1088,8 @@ ss_conv_data_t *get_ss_conv_data(conversation_t *conversation, const int proto)
     conv_data->pkt_type_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
     conv_data->nonce_map = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
     conv_data->salts = wmem_map_new(wmem_file_scope(), g_int_hash, g_int_equal);
+
+    conv_data->reassembly_info = streaming_reassembly_info_new();
 
     conversation_add_proto_data(conversation, proto, conv_data);
     return conv_data;
@@ -1535,11 +1633,11 @@ int cmp_list_frame_uint_data(const void *a, const void *b)
 {
     return *(uint32_t *)a - *(uint32_t *)b;
 }
-int get_prev_pkt_type(wmem_list_frame_t *frame, wmem_map_t *pkt_type_map)
+ss_pkt_type_t get_prev_pkt_type(wmem_list_frame_t *frame, wmem_map_t *pkt_type_map)
 {
     wmem_list_frame_t *prev_frame;
     uint32_t *prev_pinfo_num;
-    int *prev_pkt_type;
+    ss_pkt_type_t *prev_pkt_type;
 
     prev_frame = wmem_list_frame_prev(frame);
     if (prev_frame == NULL)
@@ -1554,7 +1652,7 @@ int get_prev_pkt_type(wmem_list_frame_t *frame, wmem_map_t *pkt_type_map)
         ws_critical("Failed to get previous packet index");
         return PKT_TYPE_UNKNOWN;
     }
-    prev_pkt_type = (int *)wmem_map_lookup(pkt_type_map, prev_pinfo_num);
+    prev_pkt_type = (ss_pkt_type_t *)wmem_map_lookup(pkt_type_map, prev_pinfo_num);
     if (prev_pkt_type == NULL)
     {
         ws_critical("Failed to get previous packet type");

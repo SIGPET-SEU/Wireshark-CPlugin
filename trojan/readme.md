@@ -1,4 +1,47 @@
+## 2025-3-19
+
+#### 源码修改
+
+`epan\dissectors\packet-http2.c`
+
+注释掉下面的第一行
+
+![image-20250319111953941](img/image-20250319111953941.png)
+
+下面代码是为了嵌套`tls` 后，不影响HTTP2的流追踪(有效 但不多)
+
+![image-20250319112059364](img/image-20250319112059364.png)
+
+`epan\dissectors\packet-tls-utils.h`
+
+因为`trojan`解密用了原生的`tls` 所以在原生`tls`解密参数中加了一个`trojan`秘钥的文件路径
+
+![image-20250319112508997](img/image-20250319112508997.png)
+
+这里代码加了`GUI`中设置`trojan`秘钥文件路径
+
+![image-20250319112938801](img/image-20250319112938801.png)
+
+效果：
+
+![image-20250319113251087](img/image-20250319113251087.png)
+
+`epan\dissectors\packet-tls.c`
+
+在每次加载`tls`的秘钥文件路径时，都强制再调用一次加载`trojan`秘钥文件路径，总共修改了9处。
+
+```c
+ssl_load_keyfile(ssl_options.keylog_filename, &ssl_keylog_file, &ssl_master_key_map);
+// load trojan keylog
+ssl_load_keyfile(ssl_options.trojan_keylog_filename, &ssl_keylog_file, &ssl_master_key_map);
+```
+
+
+
+![image-20250319113730202](img/image-20250319113730202.png)
+
 # 2024-10-18 Trojan V2.1
+
 ## 第一步：修改packet-http2.c
 
 ![image-20240928181302064](img/image-20240928181302064.png)

@@ -165,7 +165,8 @@ proto_reg_handoff_trojan(void)
     tls_handle = find_dissector("tls");
     h2_handle = find_dissector("http2");
     http_handle = find_dissector("http");
-    dissector_add_uint("tls.port", TROJAN_TLS_PORT, trojan_handle);
+    //dissector_add_uint("tls.port", TROJAN_TLS_PORT, trojan_handle);
+    dissector_add_uint_range_with_preference("tcp.port", TROJAN_TCP_PORT_RANGE, trojan_handle);
     // dissector_add_for_decode_as("trojan", trojan_handle); // ui
 
     /* 将 trojan 注册到 tls 的启发式解析器中 */

@@ -130,6 +130,7 @@ static int hf_msg_fragment_error;
 static int hf_msg_fragment_count;
 static int hf_msg_reassembled_in;
 static int hf_msg_reassembled_length;
+static int hf_msg_reassembled_data;
 static int hf_msg_body_segment;
 /**************VMess Fields End****************/
 
@@ -156,6 +157,8 @@ static const fragment_items msg_frag_items = {
     &hf_msg_fragment_count,
     &hf_msg_reassembled_in,
     &hf_msg_reassembled_length,
+    &hf_msg_reassembled_data,
+    "Segments"
 };
 
 static GString* kdfSaltConstAuthIDEncryptionKey;

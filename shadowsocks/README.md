@@ -19,6 +19,7 @@ Whichever way you choose, it is necessary to know the configuration of the targe
 ### 2. Set Protocol Preferences
 
 `Edit` -> `Preference` -> `Protocols` -> `Shadowsocks` ->
+
 - **Cipher type:** The AEAD method used by the Shadowsocks server. Possible values are:
   - aes-128-gcm
   - aes-192-gcm
@@ -31,12 +32,13 @@ Whichever way you choose, it is necessary to know the configuration of the targe
 ### 3. Start Capturing
 
 ## TODO
+
 - [x] Identify Shadowsocks traffic (by the port number)
 - [x] Preferences panel
 - [x] Detect and parse the salt
 - [x] Create an AEAD decryptor
-- [ ] Associate the nonce with the packet
-- [ ] Decrypt the payload
-- [ ] Setup a FSM to specify the type of packets and call the corresponding dissectors (right way?)
+- [x] Associate the nonce with the packet
+- [x] Decrypt the payload
+- [x] Setup a FSM to specify the type of packets and call the corresponding dissectors (right way?)
 - [ ] Register more header fields to dissect the decrypted payload
 - [ ] ...

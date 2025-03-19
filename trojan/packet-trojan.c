@@ -18,21 +18,32 @@ dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
     port_type save_port_type;
     uint16_t save_can_desegment;
     int ret;
-    // conversation_t* conversation;
+    conversation_t* conversation;
+    trojan_conv_data* conv_data;
+
+    // printf(trojan_keylog_file_name, "\n");
 
 
     
-    printf("--dissect_trojan_response\n");
-    printf("----pinfo->curr_layer_num: %d -----call tls_handle \n",pinfo->curr_layer_num);
+    /*printf("--dissect_trojan_response\n");
+    printf("----pinfo->curr_layer_num: %d -----call tls_handle \n",pinfo->curr_layer_num);*/
     // printf("----pinfo->ptype: %d\n", pinfo->ptype); //全是 PT_TCP
+    //printf("----pinfo->fd->visited: %d\n", pinfo->fd->visited); //第一轮全是0 后面全是1 所以应该不是影响的条件
+    //printf("can_desegment: %d, saved_can_desegment: %d\n", pinfo->can_desegment, pinfo->saved_can_desegment);//全是1,2
 
     save_port_type = pinfo->ptype;
     save_can_desegment = pinfo->can_desegment;
     pinfo->ptype = PT_NONE;
     pinfo->can_desegment = pinfo->saved_can_desegment;
 
-    // conversation = find_or_create_conversation(pinfo);
-    // conversation_set_dissector(conversation, trojan_handle);
+    conversation = find_or_create_conversation(pinfo);
+    conv_data = (trojan_conv_data *)conversation_get_proto_data(conversation, proto_trojan);
+    if (!conv_data) {
+        conv_data = wmem_new0(wmem_file_scope(), trojan_conv_data);
+        conv_data->save_port_type = save_port_type;
+        conversation_add_proto_data(conversation, proto_trojan, conv_data);
+    }
+
 
     col_set_str(pinfo->cinfo, COL_INFO, "Trojan Response & call tls_handle");
     ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, -1, ENC_NA);
@@ -42,14 +53,16 @@ dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
     next_tvb = tvb_new_subset_remaining(tvb, 0);
 
     dissector_add_string("tls.alpn", "h2", h2_handle);
-    dissector_add_string("http.upgrade", "h2", h2_handle);
-    dissector_add_string("http.upgrade", "h2c", h2_handle);
+    //dissector_add_string("tls.alpn", "http/1.1", http_tls_handle);
+    //dissector_add_string("http.upgrade", "h2", h2_handle);
+    //dissector_add_string("http.upgrade", "h2c", h2_handle);
 
     ret = call_dissector_with_data(tls_handle, next_tvb, pinfo, tree, data);
 
     dissector_delete_string("tls.alpn", "h2", h2_handle);
-    dissector_delete_string("http.upgrade", "h2", h2_handle);
-    dissector_delete_string("http.upgrade", "h2c", h2_handle);
+    //dissector_delete_string("tls.alpn", "http/1.1", http_tls_handle);
+    //dissector_delete_string("http.upgrade", "h2", h2_handle);
+    //dissector_delete_string("http.upgrade", "h2c", h2_handle);
 
     pinfo->ptype = save_port_type;
     pinfo->can_desegment = save_can_desegment;
@@ -65,8 +78,8 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
     // conversation_t* conversation;
 
 
-     printf("--dissect_trojan_request\n");
-     printf("----pinfo->curr_layer_num = %d\n", pinfo->curr_layer_num);
+     /*printf("--dissect_trojan_request\n");
+     printf("----pinfo->curr_layer_num = %d\n", pinfo->curr_layer_num);*/
 
 
     col_set_str(pinfo->cinfo, COL_INFO, "Trojan Request");
@@ -104,8 +117,8 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
     struct tlsinfo* tlsinfo = (struct tlsinfo*)data;
     //dissector_handle_t save_handle = *(tlsinfo->app_handle);
 
-    printf("dissect_trojan  pinfo->Frame number: %d, 4bytes: %s\n",
-        pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STRING));
+    /*printf("dissect_trojan  pinfo->Frame number: %d, 4bytes: %s\n",
+        pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STRING));*/
 
     /* trojan request packet */
     if (is_trojan_request(tvb)) {
@@ -121,8 +134,12 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
 
     /* not trojan packet */
     //*(tlsinfo->app_handle) = save_handle;
-    
+
+
+
+
     // 尝试其他常见协议
+    // printf(dissector_handle_get_dissector_name(*(tlsinfo->app_handle)));
     if (dissector_try_heuristic(tls_heur_subdissector_list, tvb, pinfo, tree, &heur_dtbl_entry, data)) {
         // 打印被成功调用的启发器的名字
         printf("Successful heuristic dissector: %s\n", heur_dtbl_entry->short_name);
@@ -130,7 +147,8 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
     }
 
 
-    printf("【Waring】: Cannot be parsed by trojan dissect\n");
+
+    printf("【Waring】: Cannot be parsed by trojan dissect, call data dissector\n");
 
     // return call_dissector_with_data(http_handle, tvb, pinfo, tree, data); // 
     return call_data_dissector(tvb, pinfo, tree);
@@ -141,7 +159,7 @@ dissect_trojan_heur_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, voi
 
     conversation_t* conversation;
     struct tlsinfo* tlsinfo = (struct tlsinfo*)data;
-    printf("【Info Frame number %d】：dissect_trojan_heur_tls, 4bytes: %s \n", pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STRING));
+   /* printf("【Info Frame number %d】：dissect_trojan_heur_tls, 4bytes: %s \n", pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STRING));*/
 
     /* found trojan request or response(tunnel data) */
     if (is_trojan_request(tvb) || is_trojan_response(tvb)) {
@@ -152,8 +170,11 @@ dissect_trojan_heur_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, voi
         return true;
     }
 
+
     /* not trojan packet */
-    printf("【Info Frame number %d】：dissect_trojan_heur_tls return false\n", pinfo->num);
+    // printf("【Info Frame number %d】：dissect_trojan_heur_tls return false\n", pinfo->num);
+
+
 
     return false;
 }
@@ -164,14 +185,25 @@ proto_reg_handoff_trojan(void)
 
     tls_handle = find_dissector("tls");
     h2_handle = find_dissector("http2");
-    http_handle = find_dissector("http");
+    http_tls_handle = find_dissector("http-over-tls");
     dissector_add_uint("tls.port", TROJAN_TLS_PORT, trojan_handle);
+    //dissector_add_string("tls.alpn", "http/1.1", trojan_handle);
+    //dissector_add_string("tls.alpn", "h2", trojan_handle);
+    //dissector_add_string("http.upgrade", "h2", trojan_handle);
+    //dissector_add_string("http.upgrade", "h2c", trojan_handle);
+    //dissector_add_uint_range_with_preference("tls.port", TROJAN_TLS_RANGE_PORT, trojan_handle);
     // dissector_add_for_decode_as("trojan", trojan_handle); // ui
 
     /* 将 trojan 注册到 tls 的启发式解析器中 */
     heur_dissector_add("tls", dissect_trojan_heur_tls, "Trojan Over Tls", "trojan_over_tls", proto_trojan, HEURISTIC_ENABLE);
 
     tls_heur_subdissector_list = find_heur_dissector_list("tls"); // tls 的启发式解析器列表
+
+
+    //module_t* ssl_module = prefs_find_module("tls");
+    //prefs_register_filename_preference(ssl_module, "trojan_keylog_file", "Trojan-Secret log filename",
+    //    "Trojan keylog file name",
+    //    &(trojan_keylog_file_name), false);
 
 
 }
@@ -274,11 +306,11 @@ gint tvb_find_crlf_pos(tvbuff_t* tvb) {
 }
 
 gint
-tvb_find_TLS_signiture(tvbuff_t* tvb) {
+tvb_find_TLS_signature(tvbuff_t* tvb) {
     gint min_pos = -1;
 
     for (gint i = 0; i < TLS_SIGNUM; i++) {
-        gint pos = tvb_find_bytes(tvb, 0, -1, TLS_signiture[i]);
+        gint pos = tvb_find_bytes(tvb, 0, -1, TLS_signature[i]);
         if (pos >= 0)
             if (min_pos >= 0)
                 min_pos = min_pos <= pos ? min_pos : pos; /* 返回较小的 */
@@ -351,5 +383,5 @@ is_trojan_request(tvbuff_t* tvb) {
 
 bool
 is_trojan_response(tvbuff_t* tvb) {
-    return tvb_find_TLS_signiture(tvb) == 0 ? true : false;
+    return tvb_find_TLS_signature(tvb) == 0 ? true : false;
 }

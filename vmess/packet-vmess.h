@@ -14,270 +14,367 @@
  */
 
 #include <glib.h>
-#include <wsutil/wsgcrypt.h>
+#include <gcrypt.h>
+#include <stdarg.h> /* For variable number of args in VMess KDF */
 
-void proto_register_vmess(void);
-void proto_reg_handoff_vmess(void);
-static int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static void vmess_keylog_read(void);
-
-/*
- * Reset the keylog file.
- */
-static void vmess_keylog_reset(void);
-
-static void vmess_keylog_process_line(const char* line);
-
-/* Used to do the overall initialization. */
-static void vmess_init(void);
-
-/* Used to initialize the VMess key map. */
-static void vmess_common_init(vmess_key_map_t* km);
-
-/* Used to do the overall clean-up. */
-static void vmess_cleanup(void);
-
-/* Used to clean the VMess key map. */
-static void vmess_common_clean(vmess_key_map_t* km);
-
-static void vmess_free(gpointer data);
-
-/*
- * Must be called before attempting decryption.
- */
-static gboolean vmess_decrypt_init(void);
-
-static dissector_handle_t vmess_handle;
-static dissector_handle_t tls_handle;
-static dissector_handle_t vmess_request_handle;
+/* This should be put in tfs.h, but the compiler complains that initializer is not a constant */
+const true_false_string tfs_set_notset_vmess = { "Set", "Not set" };
 
 #define TLS_SIGNUM (gint)5 /* The number of TLS record types. */
-
-static char* TLS_signiture[TLS_SIGNUM] = {
-    "\x14\x03\x03", /* Change Cipher Spec */
-    "\x15\x03\x03", /* Alert */
-    "\x16\x03\x03", /* Handshake */
-    "\x16\x03\x01", /* Handshake Legacy */
-    "\x17\x03\x03"  /* Application Data */
-};
 
 #define VMESS_PROTO_DATA_REQRES	0
 #define VMESS_PROTO_DATA_INFO	1
 
-#define VMESS_TCP_PORT 20332 /* Not IANA registed */
+// #define VMESS_TCP_PORT 20332 /* Not IANA registed */
+/**
+ * Change single port to port range, the usage is mentioned in packet-xml.c.
+ * Although packet-http.c also records the usage, it seems to be quite complicated.
+ */
+#define VMESS_TCP_PORT_RANGE "20332, 20002, 10006"
 
-static bool vmess_desegment = true; /* VMess is run atop of TCP */
+#define VMESS_AUTH_LENGTH (guint) 16
+#define VMESS_RESPONSE_HEADER_LENGTH (guint) 40
+#define VMESS_DATA_HEADER_LENGTH (guint) 2
 
-/* Keylog and decryption related variables */
-static bool vmess_decryption_supported;
-static const gchar* pref_keylog_file;
+/* Protocol register and dissection routines */
+void proto_register_vmess(void);
+void proto_reg_handoff_vmess(void);
+int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+int dissect_vmess(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+
+/* Protocol data structure init and cleanup routines */
+/* Used to do the overall initialization. */
+void vmess_init(void);
+/* Used to do the overall clean-up. */
+void vmess_cleanup(void);
+void vmess_free(gpointer data);
+
+
+/* VMess decryption structures and routines */
+/* Error handling for libgcrypt */ 
+#define GCRYPT_CHECK(gcry_error)                        \
+    if (gcry_error) {                                   \
+        fprintf(stderr, "Failure at line %d: %s\n",     \
+                __LINE__, gcry_strerror(gcry_error));   \
+        return gcry_error;                              \
+    }
+
+#define AES_128_KEY_SIZE 16
 
 #define VMESS_CIPHER_CTX gcry_cipher_hd_t
+#define GCM_IV_SIZE 12
+#define POLY1305_IV_SIZE 12
 
-typedef struct {
-    GHashTable* header_key;
-    GHashTable* header_iv;
+#define GCM_TAG_SIZE 16
+#define POLY1305_TAG_SIZE 16
+
+typedef struct _vmess_key_map_t {
+    GHashTable* req_key;
+    GHashTable* req_iv;
     GHashTable* data_key;
     GHashTable* data_iv;
     GHashTable* response_token; // Check if the response matches the request.
 } vmess_key_map_t;
+
+/*
+ * The C implementation of VMess HMACCreator implemented in Clash.
+ * Currently, only SHA256-based HMAC is supported.
+ */
+#define SHA_256_BLOCK_SIZE 64
+
+typedef struct HMACCreator_t {
+    struct HMACCreator_t* parent;
+    guchar* value;
+    gsize value_len;
+    gcry_md_hd_t* h_in, * h_out;
+} HMACCreator;
+
+/*
+ * Note that it is hmac_create's duty to open hashing handles, this
+ * function only takes care of setting up keys.
+ */
+HMACCreator*
+hmac_creator_new(HMACCreator* parent, const guchar* value, gsize value_len);
+
+/*
+ * HMAC creator cleanup routine, it will clear all the memory the
+ * possible parents allocated recursively.
+ *
+ * Since it will also close the hashing handles, the caller should
+ * keep in mind to call hmac_create FIRST to avoid closing an
+ * uninitialized hashing handle, which ALWAYS raises SIGSEGV error.
+ *
+ * NOTE: This routine also frees the param, so the caller should NOT free the param again.
+ */
+void
+hmac_creator_free(HMACCreator* creator);
+
+/*
+ * Create HMAC using the base creator.
+ */
+gcry_error_t
+hmac_create(const HMACCreator* creator);
+
+
+/*
+ * This struct is used to produce the actual nested HMAC computation.
+ * It is based on the array structure, where each of the entry is a
+ * hash handle.
+ */
+typedef struct HMACDigester_t {
+    int size;
+    guint* order;
+    gcry_md_hd_t** head;
+} HMACDigester;
+
+/*
+ * Create the digester based on the creator.
+ */
+HMACDigester*
+hmac_digester_new(HMACCreator* creator);
+
+/*
+ * HMAC digester cleanup routine, it will clear all the memory for the digester.
+ *
+ * Note that all the hash handles are copies of the original ones, so the digester
+ * only closes their copies. The caller is responsible to call hmac_creator_free to
+ * safely free the allocated memory for that creator.
+ *
+ * NOTE: This routine also frees the param, so the caller should NOT free the param again.
+ */
+void
+hmac_digester_free(HMACDigester* digester);
+
+/*
+ * This function computes nested HMAC based on iterative approach instead of
+ * the recursive one which is adopted in the Golang implementation.
+ */
+gcry_error_t
+hmac_digest(HMACDigester* digester, const guchar* msg, gssize msg_len, guchar* digest);
+
+/*
+ * This function is a convenient function to compute the digest of msg given hd, while
+ * maintain the internal state of hd by creating a copy of it. Therefore, using this
+ * routine will NOT change the internal state of hd.
+ *
+ * NOTE that the caller is responsible to allocate enough memory for param digest.
+ */
+gcry_error_t
+hmac_digest_on_copy(gcry_md_hd_t hd, const guchar* msg, gssize msg_len, guchar* digest);
+
+
+/* Used to clean the VMess key map. */
+void vmess_common_clean(vmess_key_map_t* km);
+
+/* Used to initialize the VMess key map. */
+void vmess_common_init(vmess_key_map_t* km);
+
+typedef struct vmess_cipher_suite {
+    enum gcry_cipher_modes mode;
+    enum gcry_cipher_algos algo;
+} vmess_cipher_suite_t;
 
 typedef struct {
     /* In this version, I decide to use GByteArray instead of StringInfo used in packet-tls-utils.h
      * to record key/iv or other things. Since GByteArray has an intrinsic length field, it should
      * avoid some cumbersome operations (I hope so).
      */
-    GByteArray* write_iv;
+    GString* write_iv;
+    const vmess_cipher_suite_t* cipher_suite;
     VMESS_CIPHER_CTX evp;
 } VMessDecoder;
 
-typedef struct {
-    VMessDecoder data_decoder;
-    VMessDecoder header_decoder;
-} vmess_decrypt_info_t;
+typedef struct vmess_master_key_match_group {
+    const char* re_group_name;
+    GHashTable* key_ht;
+} vmess_key_match_group_t;
 
-static vmess_key_map_t vmess_key_map; /* Structure used for recording auth, key and IV's */
+//static void vmess_keylog_read(const gchar* vmess_keylog_filename, FILE** keylog_file,
+//    const vmess_key_map_t* km);
+void vmess_keylog_read(void);
+
+/* Remove all entries for each table in the key map. */
+void vmess_keylog_remove(vmess_key_map_t* mk);
+
 /*
- * Key log file handle. Opened on demand (when keys are actually looked up),
- * closed when the capture file closes.
+ * Reset the keylog file.
  */
-static FILE* vmess_keylog_file;
+void vmess_keylog_reset(void);
 
+void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km);
 
 /*
- * User preference related variables.
- * See Section 2.6 in README.dissector for some guide.
+ * Must be called before attempting decryption.
+ */
+gboolean vmess_decrypt_init(void);
+
+/*
+ * Decoder initialization routine.
+ *
+ * @param algo          A cipher algorithm
+ * @param key           The encryption key, since the key length could be inferred by the algorithm,
+ *                      it does not need to be specified explicitly
+ * @param iv            encryption IV, since the iv length could be inferred by the mode, it does not
+ *                      need to be specified explicitly
+ * @param flag          Some extra flag.
+ */
+VMessDecoder*
+vmess_decoder_new(int algo, int mode, guchar* key, guchar* iv, guint flags);
+
+/**
+ * Reset decoder with a new IV, used for VMess data frame transmission.
  * 
- * See packet-wireguard.c for instructions on how to register pref in practice.
+ * NOTE: A decoder consists of IV, cipher_suite and CTX, this routine only reset the CTX. IV is NOT reset since
+ * VMess data IVs are inferred from the initial IV. We want to keep track of it for convenience. cipher_suite is
+ * NOT changed, either.
+ * 
+ * @param decoder       The VMess decoder with key set
+ * @param iv            The new IV for reset, the caller is responsible to allocate a proper length for the IV.
+ * 
+ * @return gcry_error_t 0 on success, failure otherwise.
  */
+gcry_error_t
+vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len);
 
-#define VMESS_AUTH_LENGTH (guint) 16
-#define VMESS_RESPONSE_HEADER_LENGTH (guint) 40
-#define VMESS_DATA_HEADER_LENGTH (guint) 2
+/*
+ * Cipher initialization routine.
+ *
+ * @param alg       The encryption algorithm
+ * @param mode      The cipher mode
+ * @param key       The encryption key
+ * @param key_len   The length of the key, if set 0, automatic inference will be used
+ * @param iv        The initialization IV
+ * @param iv_len    The length of the iv, if set 0, automatic inference will be used
+ * @param flag      The flag for encryption
+ *
+ * @return gboolean TRUE on success.
+ */
+gcry_error_t
+vmess_cipher_init(gcry_cipher_hd_t* hd, int algo, int mode, guchar* key, gsize key_len, guchar* iv, gsize iv_len, guint flags);
 
-// reassembly table for streaming chunk mode
+/*
+ * Key derive function for VMess.
+ *
+ * @param key           The original key used for key derivation
+ * @param derived_key   The key derived by the KDF
+ * @param num           The number of the messages for key derivation
+ *
+ * @return guchar*      The derived key byte buffer
+ */
+guchar*
+vmess_kdf(const guchar* key, guint key_len, guint num, ...);
+
+gcry_error_t
+vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, guchar* out, gsize outl, const guchar* ad, gsize ad_len);
+
+
+/* Reassembly related structures and routines */
+// reassembly table 
 static reassembly_table proto_vmess_streaming_reassembly_table;
 
-static int proto_vmess;
-
-/** information about a request and response on a VMess conversation. */
-typedef struct _vmess_req_res_t {
-    /** the running number on the conversation */
-    guint32 number;
-    /** frame number of the request */
-    guint32 req_framenum;
-    /** frame number of the corresponding response */
-    guint32 res_framenum;
-    /** timestamp of the request */
-    //nstime_t req_ts;
-    //guint    response_code;
-    //gchar* request_method;
-    //gchar* vmess_host;
-    //gchar* request_uri;
-    //gchar* full_uri;
-    gboolean req_has_range;
-    gboolean resp_has_range;
-
-    /** private data used by vmess dissector */
-    void* private_data;
-} vmess_req_res_t;
-
 typedef struct _vmess_conv_t {
+    gboolean req_decrypted;     /* Used to check if the VMess header is decrypted */
+    gboolean data_decrypted;    /* Used to check if the Data is decrypted */
+    gboolean resp_decrypted;    /* Used to check if the Response Header is decrypted */
     streaming_reassembly_info_t* reassembly_info;
-    vmess_decrypt_info_t* vmess_decrypt_info;
-    gchar* auth;
-    /* Used to speed up desegmenting of chunked Transfer-Encoding. */
-    wmem_map_t* chunk_offsets_fwd;
-    wmem_map_t* chunk_offsets_rev;
+    //vmess_decrypt_info_t* vmess_decrypt_info;
+    VMessDecoder* req_length_decoder;
+    VMessDecoder* req_decoder;
+    VMessDecoder* resp_length_decoder;
+    VMessDecoder* resp_decoder;
+    /*
+    * The data decoders heavily depend on the implementation of VMess.
+    * Clash seems to violate the spec of VMess. Its resp data key and IV
+    * are drawn from req data key and IV using SHA256 when AEAD is adopted.
+    * 
+    * That is, resp key = SHA256(req key)[0:16], resp IV = SHA256(req IV)[0:16],
+    * while XRay implementation seems to set resp key = req key, resp IV = req IV.
+    * 
+    * Since our prototype is based on Clash, the Clash implementation is used to 
+    * infer crypto info.
+    */
+    VMessDecoder* srv_data_decoder;
+    VMessDecoder* cli_data_decoder;
+    GString* auth;
+
+    address srv_addr;
+    guint srv_port;
+
+    guint16 count_writer;   /* The counter for AEAD client (writer) */
+    guint16 count_reader;   /* The counter for AEAD server (reader) */
 
     /* Fields related to proxied/tunneled/Upgraded connections. */
     guint32	 startframe;	/* First frame of proxied connection */
     int    	 startoffset;	/* Offset within the frame where the new protocol begins. */
     dissector_handle_t next_handle;	/* New protocol */
-
-    gchar* websocket_protocol;	/* Negotiated WebSocket protocol */
-    gchar* websocket_extensions;	/* Negotiated WebSocket extensions */
-    /* Server address and port, known after first server response */
-    guint16 server_port;
-    address server_addr;
-    /** the tail node of req_res */
-    vmess_req_res_t* req_res_tail;
-    /** Information from the last request or response can
-     * be found in the tail node. It is only sensible to look
-     * at on the first (sequential) pass, or after startframe /
-     * startoffset on connections that have proxied/tunneled/Upgraded.
-     */
-
-     /* TRUE means current message is chunked streaming, and not ended yet.
-      * This is only meaningful during the first scan.
-      */
-    gboolean message_ended;
-
-    /* Used for req/res matching */
-    GSList* req_list;
-    wmem_map_t* matches_table;
-
 } vmess_conv_t;
 
-/* request or response streaming reassembly data */
+/* VMess record type */
+typedef enum {
+    VMESS_REQUEST,
+    VMESS_RESPONSE,
+    VMESS_DATA,
+} VMessRecordType;
+
+/* Used to record decrypted messages for dissection. Ref: packet-ssh.c */
+typedef struct _vmess_message_info_t {
+    guchar* plain_data;     /**< Decrypted data. */
+    guint   data_len;       /**< Length of decrypted data. */
+    gint    id;             /**< Identifies the exact message within a frame
+                                 (there can be multiple records in a frame). */
+    struct _vmess_message_info_t* next;
+    VMessRecordType type;
+} vmess_message_info_t;
+
 typedef struct {
-    /* reassembly information only for request or response with chunked and streaming data */
-    streaming_reassembly_info_t* streaming_reassembly_info;
-    /* subdissector handler for request or response with chunked and streaming data */
-    dissector_handle_t streaming_handle;
-    /* message being passed to subdissector if the request or response has chunked and streaming data */
-    //media_content_info_t* content_info;
-    //headers_t* main_headers;
-} vmess_streaming_reassembly_data_t;
+    gboolean from_server;
+    vmess_message_info_t* messages;
+} vmess_packet_info_t;
 
-/* vmess request or response private data */
-typedef struct {
-    /* direction of request message */
-    int req_fwd_flow;
-    /* request or response streaming reassembly data */
-    vmess_streaming_reassembly_data_t* req_streaming_reassembly_data;
-    vmess_streaming_reassembly_data_t* res_streaming_reassembly_data;
-} vmess_req_res_private_data_t;
-
-
-/****************VMess Fields******************/
-static int hf_vmess_request_auth;
-static int hf_vmess_response_header;
-static int hf_vmess_payload_length;
-
-// heads for displaying reassembly information
-static int hf_msg_fragments;
-static int hf_msg_fragment;
-static int hf_msg_fragment_overlap;
-static int hf_msg_fragment_overlap_conflicts;
-static int hf_msg_fragment_multiple_tails;
-static int hf_msg_fragment_too_long_fragment;
-static int hf_msg_fragment_error;
-static int hf_msg_fragment_count;
-static int hf_msg_reassembled_in;
-static int hf_msg_reassembled_length;
-static int hf_msg_body_segment;
-/**************VMess Fields End****************/
-
-/**************VMess ETT Fileds****************/
-
-static int ett_vmess;
-
-static gint ett_msg_fragment;
-static gint ett_msg_fragments;
-
-/************VMess ETT Fileds End**************/
-
-static const fragment_items msg_frag_items = {
-    &ett_msg_fragment,
-    &ett_msg_fragments,
-    &hf_msg_fragments,
-    &hf_msg_fragment,
-    &hf_msg_fragment_overlap,
-    &hf_msg_fragment_overlap_conflicts,
-    &hf_msg_fragment_multiple_tails,
-    &hf_msg_fragment_too_long_fragment,
-    &hf_msg_fragment_error,
-    &hf_msg_fragment_count,
-    &hf_msg_reassembled_in,
-    &hf_msg_reassembled_length,
- };
-
-/* Some util functions */
-bool gbytearray_eq(const GByteArray*, const GByteArray*);
-
-bool char_array_eq(const char*, const char*, size_t);
-
-/*
- * Search if the tvb contains the needle, start at offset, end at offset + maxlength, if maxlength
- * is -1, then search until the end of the tvb. Returns the offset of the first match if found,
- * or -1 otherwise.
- * NOTE: This function will strip the terminating nul of the needle.
+/**
+ * Fetch the VMess message from the packet attached to pinfo.
  */
-gint tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle);
+vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id);
 
-/*
- * Search if the tvb contains the TLS signatures. If the tvb contains any of
- * the signature, then return the first offset (>=0) of all the possible match.
- * Otherwise, return -1.
+int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
+    vmess_message_info_t* msg);
+
+int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
+    vmess_message_info_t* msg);
+
+int dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree * vmess_tree,
+    proto_tree* tree _U_, vmess_message_info_t* msg, vmess_conv_t* conv_data);
+
+/**
+ * Encapsulate the conv_data fetching process:
+ * 
+ *  conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
+ *  if (!conv_data) {
+ *      conv_data = wmem_new0(wmem_file_scope(), vmess_conv_t);
+ *      conversation_add_proto_data(conversation, proto_vmess, conv_data);
+ *  }
+ *  if (!conv_data->reassembly_info) {
+ *      conv_data->reassembly_info = streaming_reassembly_info_new();
+ *  }
+ * 
+ * into a single routine.
  */
-gint tvb_find_TLS_signiture(tvbuff_t* tvb);
+vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess);
 
-/*
- * Search a string (needle) in another string (haystack), like memmem in glibc, except that we
- * return the index instead of the pointer to the match. It returns -1 if no match was found.
- */
-gint mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size);
-
-/* Debug relavant variables and functions */
+/* Debug relavant variables and routines */
 /* From packet-ssh.c, packet-tls.c and packet-tls-utils.c */
 #define VMESS_DECRYPT_DEBUG
 
 #ifdef VMESS_DECRYPT_DEBUG /* {{{ */
 
+/*
+ * User preference related variables.
+ * See Section 2.6 in README.dissector for some guide.
+ *
+ * See packet-wireguard.c for instructions on how to register pref in practice.
+ */
 static const gchar* vmess_debug_file_name;
 #define VMESS_DEBUG_USE_STDERR "-"
 
@@ -300,3 +397,38 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 #define vmess_debug_print_hash_table(hash_table)
 #define vmess_debug_print_key_value(key, value, user_data)
 #endif /* VMESS_DECRYPT_DEBUG }}} */
+
+
+/* Some util functions */
+/*
+ * Convert a uint16 number into its byte-wise representation in Big Endian manner
+ */
+void
+put_uint16_be(uint16_t value, unsigned char* buffer);
+
+/*
+ * Convert a uint16 number into its byte-wise representation in Little Endian manner
+ */
+void
+put_uint16_le(uint16_t value, unsigned char* buffer);
+
+/*
+ * Write the content of a string into its hex form. For example, given the string
+ * "0102030aefbb", we convert each octet into a single byte into the target.
+ * After conversion, the result should be "\x01\x02\x03\x0a\xef\xbb".
+ *
+ * @param in    The string to be converted.
+ * @param out   The output hex-formed string.
+ * @param datalen   The length of the input string.
+ *
+ * @return  TRUE if succeeded, FALSE otherwise.
+ */
+gboolean from_hex(const char* in, GString* out, guint datalen);
+
+/**
+ * This is the raw char* version of from_hex, used for handling the raw bytes
+ * read from tvb, where looking up the GHashMap with GByteArray would be cumbersome.
+ * 
+ * NOTE that the caller is responsbile for memory allocattion with reasonable size.
+ */
+gboolean from_hex_raw(const char* in, gchar * out, guint datalen);

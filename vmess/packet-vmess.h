@@ -30,7 +30,7 @@ const true_false_string tfs_set_notset_vmess = { "Set", "Not set" };
  * Change single port to port range, the usage is mentioned in packet-xml.c.
  * Although packet-http.c also records the usage, it seems to be quite complicated.
  */
-#define VMESS_TCP_PORT_RANGE "20332, 20002, 10006"
+#define VMESS_TCP_PORT_RANGE "20332, 20002, 10006, 20016"
 
 #define VMESS_AUTH_LENGTH (guint) 16
 #define VMESS_RESPONSE_HEADER_LENGTH (guint) 40

@@ -192,7 +192,8 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         if (tmp_pkt_type == PKT_TYPE_SALT || tmp_pkt_type == PKT_TYPE_SALT_REASSEMBLY)
             copy_address(conv_data->server_addr, &pinfo->dst);
     }
-    is_request = (cmp_address(&pinfo->dst, conv_data->server_addr) == 0);
+    else
+        is_request = (cmp_address(&pinfo->dst, conv_data->server_addr) == 0);
 
     /*** Type Detection ***/
     tmp_pkt_type = detect_ss_pkt_type(tvb, pinfo->num, conv_data, is_request);

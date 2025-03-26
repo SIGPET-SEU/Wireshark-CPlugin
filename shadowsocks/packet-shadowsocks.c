@@ -28,9 +28,15 @@
 #include <wsutil/report_message.h>
 #include <wsutil/wsgcrypt.h>
 
-#ifndef __MINGW32__
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#ifdef _WIN32
+    // Windows-specific headers and definitions
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+#else
+    #ifndef __MINGW32__
+    #include <arpa/inet.h>
+    #include <netinet/in.h>
+    #endif
 #endif
 
 #include "packet-shadowsocks.h"

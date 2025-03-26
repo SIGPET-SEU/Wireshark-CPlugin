@@ -14,6 +14,9 @@
  * <http://shadowsocks.org>
  */
 
+/********** Logging Domain **********/
+#define WS_LOG_DOMAIN "packet-shadowsocks"
+
 #include "config.h"
 
 #include <wireshark.h>
@@ -31,9 +34,6 @@
 #endif
 
 #include "packet-shadowsocks.h"
-
-/********** Logging Domain **********/
-#define WS_LOG_DOMAIN "packet-shadowsocks"
 
 /********** Protocol Handles **********/
 static int proto_ss;
@@ -192,7 +192,8 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         if (tmp_pkt_type == PKT_TYPE_SALT || tmp_pkt_type == PKT_TYPE_SALT_REASSEMBLY)
             copy_address(conv_data->server_addr, &pinfo->dst);
     }
-    is_request = (cmp_address(&pinfo->dst, conv_data->server_addr) == 0);
+    else
+        is_request = (cmp_address(&pinfo->dst, conv_data->server_addr) == 0);
 
     /*** Type Detection ***/
     tmp_pkt_type = detect_ss_pkt_type(tvb, pinfo->num, conv_data, is_request);
@@ -247,6 +248,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         break;
     case PKT_TYPE_SALT_WITH_STREAM_DATA:
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data]");
+        tvb_memcpy(tvb, conv_data->response_cipher_ctx->salt, 0, ss_crypto->cipher->key_len);
         tvbuff_t *salt_tvb = tvb_new_subset_length(tvb, 0, ss_crypto->cipher->key_len);
         dissect_ss_salt(salt_tvb, pinfo, ss_tree, data);
         tvbuff_t *stream_data_tvb = tvb_new_subset_remaining(tvb, ss_crypto->cipher->key_len);
@@ -268,18 +270,18 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
                          get_ss_stream_data_pdu_len,
                          dissect_ss_pdu, NULL);
         break;
-    case PKT_TYPE_STREAM_DATA_NEED_MORE:
-        col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data (Need More)]");
-        tcp_dissect_pdus(tvb, pinfo, ss_tree, true,
-                         CHUNK_SIZE_LEN + ss_crypto->cipher->tag_len,
-                         get_ss_stream_data_pdu_len,
-                         dissect_ss_pdu, NULL);
-        break;
     case PKT_TYPE_SALT_WITH_STREAM_DATA_NEED_MORE:
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data (Need More)]");
         tcp_dissect_pdus(tvb, pinfo, ss_tree, true,
                          ss_crypto->cipher->key_len + CHUNK_SIZE_LEN + ss_crypto->cipher->tag_len,
                          get_ss_salt_with_stream_data_pdu_len,
+                         dissect_ss_pdu, NULL);
+        break;
+    case PKT_TYPE_STREAM_DATA_NEED_MORE:
+        col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data (Need More)]");
+        tcp_dissect_pdus(tvb, pinfo, ss_tree, true,
+                         CHUNK_SIZE_LEN + ss_crypto->cipher->tag_len,
+                         get_ss_stream_data_pdu_len,
                          dissect_ss_pdu, NULL);
         break;
     case PKT_TYPE_SALT_REASSEMBLY:
@@ -293,17 +295,18 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, conv_data, is_request, true);
         dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, data);
         break;
-    case PKT_TYPE_STREAM_DATA_REASSEMBLY:
-        col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data (Reassembly)]");
-        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, conv_data, is_request, true);
-        dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, conv_data);
-        break;
     case PKT_TYPE_SALT_WITH_STREAM_DATA_REASSEMBLY:
         col_set_str(pinfo->cinfo, COL_INFO, "[Salt & Stream Data (Reassembly)]");
+        tvb_memcpy(tvb, conv_data->response_cipher_ctx->salt, 0, ss_crypto->cipher->key_len);
         salt_tvb = tvb_new_subset_length(tvb, 0, ss_crypto->cipher->key_len);
         dissect_ss_salt(salt_tvb, pinfo, ss_tree, data);
         stream_data_tvb = tvb_new_subset_remaining(tvb, ss_crypto->cipher->key_len);
         decrypted_tvb = dissect_ss_encrypted_data(stream_data_tvb, pinfo, cipher_ctx_tree, data, conv_data, is_request, true);
+        dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, conv_data);
+        break;
+    case PKT_TYPE_STREAM_DATA_REASSEMBLY:
+        col_set_str(pinfo->cinfo, COL_INFO, "[Stream Data (Reassembly)]");
+        decrypted_tvb = dissect_ss_encrypted_data(tvb, pinfo, cipher_ctx_tree, data, conv_data, is_request, true);
         dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, conv_data);
         break;
     default:
@@ -767,7 +770,7 @@ unsigned get_ss_stream_data_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offse
 
     /* Cast to unsigned */
     // NOTE: encrypted payload length(2) | length tag(tlen) | encrypted payload(plen) | payload tag(tlen)
-    return (unsigned)(CHUNK_SIZE_LEN + plen + 2 * tlen);
+    return (unsigned)(CHUNK_SIZE_LEN + tlen + plen + tlen);
 }
 
 unsigned get_ss_salt_with_stream_data_pdu_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_)

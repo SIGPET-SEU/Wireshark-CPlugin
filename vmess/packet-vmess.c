@@ -592,15 +592,18 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
     /* Since a response packet is usually followed by a data packet, we try to do data dissection here */
     if (tvb_reported_length_remaining(tvb, offset) > 0) {
         /* There is some data following the response */
-        gboolean success = decrypt_vmess_data(tvb, pinfo, vmess_tree, offset, conv_data);
-        if (!success) return 0; /* Give up decryption upon failure. */
+        if (!pinfo->fd->visited) {
+            gboolean success = decrypt_vmess_data(tvb, pinfo, vmess_tree, offset, conv_data);
+            if (!success) return 0; /* Give up decryption upon failure. */
+        }
+        vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
+        if (!data_msg)
+            return 0;
+
+        dissect_decrypted_vmess_data(tvb, pinfo, vmess_tree, tree, data_msg, conv_data);
+        return 0;
     }
 
-    vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
-    if (!data_msg)
-        return 0;
-
-    dissect_decrypted_vmess_data(tvb, pinfo, vmess_tree, tree, data_msg, conv_data);
     return 0;
 }
 
@@ -779,10 +782,13 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     /* TODO: Perform decryption on the tvb */
     guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
 
-    gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
-    if (!success) {
-        vmess_debug_printf("VMess data decryption failed, higher level dissection is impossible.\n");
+    if (!pinfo->fd->visited) { // Only try decryption once.
+        gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
+        if (!success) {
+            vmess_debug_printf("VMess data decryption failed, higher level dissection is impossible.\n");
+        }
     }
+    
     vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
     if (!data_msg)
         return 0;

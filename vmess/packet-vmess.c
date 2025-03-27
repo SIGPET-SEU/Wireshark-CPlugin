@@ -816,7 +816,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
     bool is_request = false;
 
     /* The request could be dissected only once, since it occupies exactly one packet. */
-    if (tvb_reported_length(tvb) > 61 && !conv_data->req_decrypted) { /* Minimum VMess request length */
+    if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth_raw_data = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth_raw_data, (VMESS_AUTH_LENGTH + 1));
 
@@ -842,10 +842,14 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
              * However, when securityNone is used, the right approach is to use heuristic dissector to 
              * dissect later VMess data/response packets. This idea would be implemented in the future.
              */
-            g_string_free(tmp_auth, true);
-            vmess_debug_printf("Unable to find auth in this packet, further dissection impossible. Frame: %d.\n",
-                pinfo->fd->num);
-            return tvb_captured_length(tvb);
+
+            /* If request key is not found, and the request is not decrypted yet, the whole conversation could not be decrypted. */ 
+            if (!conv_data->req_decrypted) { 
+                g_string_free(tmp_auth, true);
+                vmess_debug_printf("Unable to find auth in this packet, further dissection impossible. Frame: %d.\n",
+                    pinfo->fd->num);
+                return tvb_captured_length(tvb);
+            }
         }
     }
 

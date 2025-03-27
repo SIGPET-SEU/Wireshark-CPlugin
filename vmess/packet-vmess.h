@@ -298,6 +298,7 @@ typedef struct _vmess_conv_t {
     VMessDecoder* srv_data_decoder;
     VMessDecoder* cli_data_decoder;
     GString* auth;
+    GString* respV; /* Used to check response */
 
     address srv_addr;
     guint srv_port;

@@ -402,7 +402,7 @@ int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tr
     proto_tree* vmess_tree;
     proto_item* ti;
 
-    col_set_str(pinfo->cinfo, COL_INFO, "VMESS Response");
+    col_append_sep_str(pinfo->cinfo, COL_INFO, NULL, "VMESS Response");
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
     ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     vmess_tree = proto_item_add_subtree(ti, ett_vmess);
@@ -432,7 +432,7 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
     proto_tree* vmess_tree;
     proto_item* ti;
 
-    col_set_str(pinfo->cinfo, COL_INFO, "VMESS Data");
+    col_append_sep_str(pinfo->cinfo, COL_INFO, NULL, "VMESS Data");
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
 
     ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);

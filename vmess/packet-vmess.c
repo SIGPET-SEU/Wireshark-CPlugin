@@ -600,28 +600,34 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
     /* If the response has not been decrypted yet, one should perform decryption first. */
+    guint response_chunk_length = 38; /* TODO: use macro instead of magic constant */
+    tvbuff_t* response_chunk_tvb = tvb_new_subset_length(tvb, offset, response_chunk_length);
+
     if (!conv_data->resp_decrypted) {
-        gboolean success = decrypt_vmess_response(tvb, pinfo, tree, offset, conv_data);
+        gboolean success = decrypt_vmess_response(response_chunk_tvb, pinfo, tree, 0, conv_data);
         if (!success) return 0; /* Give up decryption upon failure. */
         conv_data->resp_decrypted = TRUE;
     }
 
-    vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
+    vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(response_chunk_tvb));
     ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
 
-    offset = dissect_decrypted_vmess_response(tvb, pinfo, tree, resp_msg);
+    offset = dissect_decrypted_vmess_response(response_chunk_tvb, pinfo, tree, resp_msg);
 
 
     /* If the conversation has been decrypted already, one should check if this is a resp */
     while (tvb_reported_length_remaining(tvb, offset) > 0) {
+        guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
+        tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
         if (!pinfo->fd->visited) {
-            gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
+            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, tree, 0, conv_data);
             if (!success) return 0; /* Give up decryption upon failure. */
         }
-        vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
-        ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
-
-        offset += dissect_decrypted_vmess_data(tvb, pinfo, tree, data_msg, conv_data);
+        vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
+        if (data_msg) {
+            dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, data_msg, conv_data);
+        }
+        offset += data_chunk_length;
     }
 
     return 0;
@@ -749,7 +755,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
             NULL, 0);
         if (err != 0) {
             vmess_debug_printf("VMess data from server decryption failed: %s.\n", gcry_strsource(err));
-            return false; /* Decryption failed */
+            return FALSE; /* Decryption failed */
         }
         conv_data->count_reader++;
     }
@@ -775,7 +781,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
             NULL, 0);
         if (err != 0) {
             vmess_debug_printf("VMess data from server decryption failed: %s.\n", gcry_strsource(err));
-            return false; /* Decryption failed */
+            return FALSE; /* Decryption failed */
         }
         conv_data->count_writer++;
     }

@@ -624,40 +624,10 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
             if (!success) return 0; /* Give up decryption upon failure. */
         }
         vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
-        if (data_msg) {
-            dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, data_msg, conv_data);
-        }
-        offset += data_chunk_length;
+        offset += dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, data_msg, conv_data);
     }
 
     return 0;
-    
-    //vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
-    //if (!resp_msg) {
-    //    vmess_debug_printf("No more VMess messages, further dissection impossible./n");
-    //}
-    //else {
-    //    dissect_decrypted_vmess_response(tvb, pinfo, tree, resp_msg);
-    //}
-
-    //offset = 38;
-
-    ///* Since a response packet is usually followed by a data packet, we try to do data dissection here */
-    //if (tvb_reported_length_remaining(tvb, offset) > 0) {
-    //    /* There is some data following the response */
-    //    if (!pinfo->fd->visited) {
-    //        gboolean success = decrypt_vmess_data(tvb, pinfo, vmess_tree, offset, conv_data);
-    //        if (!success) return 0; /* Give up decryption upon failure. */
-    //    }
-    //    vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
-    //    if (!data_msg)
-    //        return 0;
-
-    //    dissect_decrypted_vmess_data(tvb, pinfo, vmess_tree, tree, data_msg, conv_data);
-    //    return 0;
-    //}
-
-    //return 0;
 }
 
 guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,

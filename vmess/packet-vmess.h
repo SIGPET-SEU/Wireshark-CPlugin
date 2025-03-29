@@ -34,6 +34,8 @@ const true_false_string tfs_set_notset_vmess = { "Set", "Not set" };
 
 #define VMESS_AUTH_LENGTH (guint) 16
 #define VMESS_RESPONSE_HEADER_LENGTH (guint) 40
+#define VMESS_RESPV_LENGTH (guint) 1
+#define VMESS_RESPONSE_HEADER_AEAD_LENGTH_SIZE (guint) 2
 #define VMESS_DATA_HEADER_LENGTH (guint) 2
 
 /* Protocol register and dissection routines */

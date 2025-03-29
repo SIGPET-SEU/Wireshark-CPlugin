@@ -85,6 +85,7 @@ static int hf_vmess_request_opt_M;  /* Meta info obfuscation */
 static int hf_vmess_request_opt_R;  /* Reuse TCP connection, deprecated since XRay Ver. 2.23+ */
 static int hf_vmess_request_opt_S;  /* Standard stream format */
 
+
 /**
  * The VMess spec for encryption method seems to differ from the Clash and X2Ray implementations.
  */
@@ -296,6 +297,9 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     }
 
     gint record_id = tvb_raw_offset(tvb) + offset;
+    /* Store respV for later use */
+    conv_data->respV = wmem_new0(wmem_file_scope(), GString);
+    conv_data->respV = g_string_append_len(conv_data->respV, aeadPayload + 1 + 16 + 16, VMESS_RESPV_LENGTH);
 
     vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
     message->type = VMESS_REQUEST;
@@ -395,10 +399,25 @@ int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tr
     guint plaintext_len = msg->data_len;
     proto_item* opt_ti;
     proto_tree* opt_tree;
+    proto_tree* vmess_tree;
+    proto_item* ti;
+
+    col_set_str(pinfo->cinfo, COL_INFO, "VMESS Response");
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
+    ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
+    vmess_tree = proto_item_add_subtree(ti, ett_vmess);
 
     tvbuff_t* packet_tvb = tvb_new_child_real_data(tvb, plaintext, plaintext_len, plaintext_len);
     add_new_data_source(pinfo, packet_tvb, "Decrypted VMess Response");
-    return 0;
+
+    proto_tree_add_item(tree, hf_vmess_respV, packet_tvb, 0, 1, ENC_BIG_ENDIAN);
+
+    ///* Dissect Opt as a subtree and add human-friendly info */
+    //guint8 opt = (guint8)plaintext[1];
+    //opt_ti = proto_tree_add_uint(tree, hf_vmess_request_opt, packet_tvb, 1, 1, opt);
+
+    guint offset = VMESS_RESPONSE_HEADER_AEAD_LENGTH_SIZE + GCM_TAG_SIZE + 4 + GCM_TAG_SIZE;
+    return offset;
 }
 
 int
@@ -426,7 +445,8 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
 
     pinfo->ptype = save_port_type;
     pinfo->can_desegment = save_can_desegment;
-    return 0;
+    guint offset = VMESS_DATA_HEADER_LENGTH + plaintext_len + GCM_TAG_SIZE;
+    return offset;
 }
 
 guint get_dissect_vmess_response_len(packet_info* pinfo _U_, tvbuff_t* tvb,
@@ -570,41 +590,32 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
     /* get associated state information, create if necessary */
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
-    col_set_str(pinfo->cinfo, COL_INFO, "VMESS Response");
-    col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
-    ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
-    vmess_tree = proto_item_add_subtree(ti, ett_vmess);
-    proto_tree_add_item(vmess_tree, hf_vmess_response_header, tvb, 0, 38, ENC_BIG_ENDIAN);
-    proto_tree_add_item(vmess_tree, hf_vmess_payload_length, tvb, 38, 2, ENC_BIG_ENDIAN);
-
     /* If the response has not been decrypted yet, one should perform decryption first. */
-    //if (!conv_data->resp_decrypted) {
-    //    gboolean success = decrypt_vmess_response(tvb, pinfo, vmess_tree, offset, conv_data);
-    //    if (!success) return 0; /* Give up decryption upon failure. */
-    //    conv_data->resp_decrypted = TRUE;
-    //}
-    //else { /* If the conversation has been decrypted already, one should check if this is a resp */
-
-    //}
     if (!conv_data->resp_decrypted) {
         gboolean success = decrypt_vmess_response(tvb, pinfo, vmess_tree, offset, conv_data);
-        if (!success) { /* Give up decryption upon failure. */
-            vmess_debug_printf("VMess response decryption failed, further dissection on response is impossible./n");
-        }
-        else {
-            conv_data->resp_decrypted = TRUE;
-        }
+        if (!success) return 0; /* Give up decryption upon failure. */
+        conv_data->resp_decrypted = TRUE;
     }
+
+    vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
+    ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
+
+    offset = dissect_decrypted_vmess_response(tvb, pinfo, tree, resp_msg);
+
 
     /* If the conversation has been decrypted already, one should check if this is a resp */
     while (tvb_reported_length_remaining(tvb, offset) > 0) {
-        vmess_message_info_t* msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
-        if (!msg) {
-            vmess_debug_printf("No more VMess messages, further dissection impossible./n");
-            return 0;
+        if (!pinfo->fd->visited) {
+            gboolean success = decrypt_vmess_data(tvb, pinfo, vmess_tree, offset, conv_data);
+            if (!success) return 0; /* Give up decryption upon failure. */
         }
+        vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
+        ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
 
+        offset += dissect_decrypted_vmess_data(tvb, pinfo, vmess_tree, tree, data_msg, conv_data);
     }
+
+    return 0;
     
     //vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
     //if (!resp_msg) {
@@ -809,6 +820,8 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     /* TODO: Perform decryption on the tvb */
     guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
 
+
+
     if (!pinfo->fd->visited) { // Only try decryption once.
         gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
         if (!success) {
@@ -917,9 +930,43 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 dissect_vmess_response_pdu, data);
         }
         else {
-            tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
-                VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
-                dissect_vmess_data_pdu, data);
+            /* Fetch pinfo */
+            /*The response has been decrypted, and the following frames not visited must be data frames */
+            if (!pinfo->fd->visited) { 
+                tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
+                    VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
+                    dissect_vmess_data_pdu, data);
+            }
+            else {
+                /* During the second pass, all frames are decrypted, we extract the first byte of the plain data
+                * to check respV to decide whether this frame is response or data frame.
+                */
+                gboolean is_response;
+                vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+                if (packet) {
+                    /* RespV will only appear at the first byte within the first message */
+                    vmess_message_info_t* msg = packet->messages;
+                    GString* respV = g_string_new_len(msg->plain_data, VMESS_RESPV_LENGTH);
+
+                    if (g_string_equal(respV, conv_data->respV)) {
+                        tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
+                            VMESS_RESPONSE_HEADER_LENGTH,
+                            get_dissect_vmess_response_len,
+                            dissect_vmess_response_pdu, data);
+                    }
+                    else {
+                        tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
+                            VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
+                            dissect_vmess_data_pdu, data);
+                    }
+                    g_string_free(respV, TRUE);
+                }
+                else {
+                    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
+                        VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
+                        dissect_vmess_data_pdu, data);
+                }
+            }
         }
     }
 
@@ -1582,7 +1629,7 @@ proto_register_vmess(void)
             NULL, HFILL }
         },
         { &hf_vmess_respV,
-            {"Auth", "vmess.respV",
+            {"RespV", "vmess.respV",
             FT_BYTES, BASE_NONE,
             NULL, 0x0,
             NULL, HFILL }

@@ -410,7 +410,7 @@ int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tr
     tvbuff_t* packet_tvb = tvb_new_child_real_data(tvb, plaintext, plaintext_len, plaintext_len);
     add_new_data_source(pinfo, packet_tvb, "Decrypted VMess Response");
 
-    proto_tree_add_item(tree, hf_vmess_respV, packet_tvb, 0, 1, ENC_BIG_ENDIAN);
+    proto_tree_add_item(vmess_tree, hf_vmess_respV, packet_tvb, 0, 1, ENC_BIG_ENDIAN);
 
     ///* Dissect Opt as a subtree and add human-friendly info */
     //guint8 opt = (guint8)plaintext[1];
@@ -422,13 +422,22 @@ int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tr
 
 int
 dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
-                            proto_tree* vmess_tree, proto_tree* tree _U_,
-                            vmess_message_info_t* msg, vmess_conv_t* conv_data)
+                            proto_tree* tree _U_, vmess_message_info_t* msg,
+                            vmess_conv_t* conv_data)
 {
     guchar* plaintext = msg->plain_data;
     guint plaintext_len = msg->data_len;
     port_type save_port_type;
     guint16 save_can_desegment;
+    proto_tree* vmess_tree;
+    proto_item* ti;
+
+    col_set_str(pinfo->cinfo, COL_INFO, "VMESS Data");
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
+
+    ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
+    vmess_tree = proto_item_add_subtree(ti, ett_vmess);
+    proto_tree_add_item(vmess_tree, hf_vmess_payload_length, tvb, 0, 2, ENC_BIG_ENDIAN);
 
     tvbuff_t* packet_tvb = tvb_new_child_real_data(tvb, plaintext, plaintext_len, plaintext_len);
     add_new_data_source(pinfo, packet_tvb, "Decrypted VMess Data");
@@ -592,7 +601,7 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
 
     /* If the response has not been decrypted yet, one should perform decryption first. */
     if (!conv_data->resp_decrypted) {
-        gboolean success = decrypt_vmess_response(tvb, pinfo, vmess_tree, offset, conv_data);
+        gboolean success = decrypt_vmess_response(tvb, pinfo, tree, offset, conv_data);
         if (!success) return 0; /* Give up decryption upon failure. */
         conv_data->resp_decrypted = TRUE;
     }
@@ -606,13 +615,13 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
     /* If the conversation has been decrypted already, one should check if this is a resp */
     while (tvb_reported_length_remaining(tvb, offset) > 0) {
         if (!pinfo->fd->visited) {
-            gboolean success = decrypt_vmess_data(tvb, pinfo, vmess_tree, offset, conv_data);
+            gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
             if (!success) return 0; /* Give up decryption upon failure. */
         }
         vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
         ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
 
-        offset += dissect_decrypted_vmess_data(tvb, pinfo, vmess_tree, tree, data_msg, conv_data);
+        offset += dissect_decrypted_vmess_data(tvb, pinfo, tree, data_msg, conv_data);
     }
 
     return 0;
@@ -798,10 +807,6 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
 }
 
 int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-    proto_tree* vmess_tree;
-    proto_item* ti;
-    tvbuff_t* next_tvb;
-
     conversation_t* conversation;
     vmess_conv_t* conv_data;
     int offset = 0;
@@ -812,11 +817,11 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     /* get associated state information, create if necessary */
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
-    col_set_str(pinfo->cinfo, COL_INFO, "VMESS Data");
-    col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
-    ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
-    vmess_tree = proto_item_add_subtree(ti, ett_vmess);
-    proto_tree_add_item(vmess_tree, hf_vmess_payload_length, tvb, 0, 2, ENC_BIG_ENDIAN);
+    //col_set_str(pinfo->cinfo, COL_INFO, "VMESS Data");
+    //col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
+    //ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
+    //vmess_tree = proto_item_add_subtree(ti, ett_vmess);
+    
     /* TODO: Perform decryption on the tvb */
     guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
 
@@ -833,7 +838,7 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     if (!data_msg)
         return 0;
 
-    dissect_decrypted_vmess_data(tvb, pinfo, vmess_tree, tree, data_msg, conv_data);
+    dissect_decrypted_vmess_data(tvb, pinfo, tree, data_msg, conv_data);
 
     return 0;
 }

@@ -46,11 +46,6 @@
 #define ADDRTYPE_MASK 0xF
 #define CHUNK_SIZE_LEN 2
 #define CHUNK_SIZE_MASK 0x3FFF
-/* Content */
-#define MAX_HOSTNAME_LEN 256 // FQCN <= 255 characters
-#define MAX_PORT_STR_LEN 6   // PORT < 65536
-#define INET_SIZE 4
-#define INET6_SIZE 16
 /* ATYP in Relay Header */
 #define RELAY_HEADER_ATYP_IPV4 1
 #define RELAY_HEADER_ATYP_DOMAINNAME 3
@@ -85,8 +80,7 @@ typedef struct ss_cipher
 
 typedef struct ss_cipher_ctx
 {
-    uint32_t init;
-    uint64_t counter;
+    bool init;
     ss_cipher_t *cipher;
     uint8_t salt[MAX_KEY_LENGTH];
     uint8_t skey[MAX_KEY_LENGTH];
@@ -96,7 +90,6 @@ typedef struct ss_cipher_ctx
 typedef struct ss_crypto
 {
     ss_cipher_t *cipher;
-
     int (*const decrypt)(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_t *n, size_t **plen, size_t clen);
     void (*const ctx_init)(ss_cipher_t *, ss_cipher_ctx_t *);
     void (*const ctx_release)(ss_cipher_ctx_t *);
@@ -106,10 +99,8 @@ typedef struct ss_conv_data
 {
     address *server_addr;
     bool relay_header_dissection_done; // A flag to indicate if the relay header has been dissected
-
     ss_cipher_ctx_t *client_cipher_ctx;
     ss_cipher_ctx_t *server_cipher_ctx;
-
     streaming_reassembly_info_t *reassembly_info;
 } ss_conv_data_t;
 
@@ -118,13 +109,10 @@ typedef struct ss_message_info
     uint8_t *plain_data;
     uint32_t data_len;
     int id;
-
     SsRecordType type;
-
     uint8_t *salt;
     uint8_t *skey;
     uint8_t *nonce;
-
     struct ss_message_info *next;
 } ss_message_info_t;
 
@@ -134,14 +122,11 @@ typedef struct ss_packet_info
     ss_message_info_t *messages;
 } ss_packet_info_t;
 
-typedef void (*PrintFunc)(const void *key, const void *value, void *user_data);
-
 /********** Function Prototypes **********/
 /* Dissectors */
-unsigned get_ss_salt_len(packet_info *pinfo _U_, tvbuff_t *tvb _U_, int offset _U_, void *data _U_);
-unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_);
-int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *tree, void *data _U_);
-int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_);
+unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data);
+int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
+int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 /* Registers */
@@ -162,8 +147,9 @@ void ss_aead_ctx_release(ss_cipher_ctx_t *cipher_ctx _U_);
 uint16_t load16_be(const void *s);
 void sodium_increment(unsigned char *n, const size_t nlen);
 int validate_hostname(const char *hostname, const int hostname_len);
-// int cmp_list_frame_uint_data(const void *a, const void *b);
+int cmp_list_frame_uint_data(const void *a, const void *b) _U_;
 /* Debugging */
+typedef void (*PrintFunc)(const void *key, const void *value, void *user_data);
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data);
 void debug_print_uint_key_uint_value(const void *key, const void *value, void *user_data);
 void debug_print_uint_key_uint8_array_value(const void *key, const void *value, void *user_data);

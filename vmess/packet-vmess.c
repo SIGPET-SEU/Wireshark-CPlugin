@@ -785,7 +785,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
 int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     conversation_t* conversation;
     vmess_conv_t* conv_data;
-    int offset = 0;
+    guint offset = 0;
 
     /* get conversation, create if necessary*/
     conversation = find_or_create_conversation(pinfo);
@@ -799,22 +799,34 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     //vmess_tree = proto_item_add_subtree(ti, ett_vmess);
     
     /* TODO: Perform decryption on the tvb */
-    guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
+    //guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
 
-
-
-    if (!pinfo->fd->visited) { // Only try decryption once.
-        gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
-        if (!success) {
-            vmess_debug_printf("VMess data decryption failed, higher level dissection is impossible.\n");
+    while (tvb_reported_length_remaining(tvb, offset) > 0) {
+        guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
+        tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
+        if (!pinfo->fd->visited) {
+            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, tree, 0, conv_data);
+            if (!success) return 0; /* Give up decryption upon failure. */
         }
+        vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
+        if (data_msg) {
+            dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, data_msg, conv_data);
+        }
+        offset += data_chunk_length;
     }
-    
-    vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
-    if (!data_msg)
-        return 0;
 
-    dissect_decrypted_vmess_data(tvb, pinfo, tree, data_msg, conv_data);
+    //if (!pinfo->fd->visited) { // Only try decryption once.
+    //    gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
+    //    if (!success) {
+    //        vmess_debug_printf("VMess data decryption failed, higher level dissection is impossible.\n");
+    //    }
+    //}
+    //
+    //vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
+    //if (!data_msg)
+    //    return 0;
+
+    //dissect_decrypted_vmess_data(tvb, pinfo, tree, data_msg, conv_data);
 
     return 0;
 }
@@ -929,7 +941,8 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                     vmess_message_info_t* msg = packet->messages;
                     GString* respV = g_string_new_len(msg->plain_data, VMESS_RESPV_LENGTH);
 
-                    if (g_string_equal(respV, conv_data->respV)) {
+                    if (g_string_equal(respV, conv_data->respV) &&
+                        memcmp(msg->plain_data + VMESS_RESPV_LENGTH, "\x00\x00\x00", 3) == 0) {
                         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
                             VMESS_RESPONSE_HEADER_LENGTH,
                             get_dissect_vmess_response_len,

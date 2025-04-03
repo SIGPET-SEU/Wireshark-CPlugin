@@ -608,7 +608,7 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     int host_len;
 
     /*** Protocol Tree ***/
-    atyp = tvb_get_uint8(tvb, offset);
+    atyp = tvb_get_guint8(tvb, offset);
     proto_tree_add_item(tree, hf_atyp, tvb, offset++, 1, ENC_BIG_ENDIAN);
     switch (atyp & ADDRTYPE_MASK)
     {
@@ -618,7 +618,7 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         proto_tree_add_ipv4(tree, hf_dst_addr_ipv4, tvb, offset, host_len, in4_addr);
         break;
     case RELAY_HEADER_ATYP_DOMAINNAME:
-        host_len = (int)tvb_get_uint8(tvb, offset);
+        host_len = (int)tvb_get_guint8(tvb, offset);
         proto_tree_add_item(tree, hf_dst_addr_domainname_len, tvb, offset++, 1, ENC_BIG_ENDIAN);
         proto_tree_add_item(tree, hf_dst_addr_domainname, tvb, offset, host_len, ENC_ASCII);
         break;
@@ -1831,7 +1831,7 @@ void debug_print_tvb(tvbuff_t *tvb, const char *var_name)
 
     for (size_t i = 0; i < tvb_captured_length(tvb); i++)
     {
-        snprintf(tmp, sizeof(tmp), "%02x", tvb_get_uint8(tvb, i));
+        snprintf(tmp, sizeof(tmp), "%02x", tvb_get_guint8(tvb, i));
         strcat(buf, tmp);
     }
 

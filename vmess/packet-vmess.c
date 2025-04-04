@@ -458,9 +458,12 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
     return offset;
 }
 
+/**
+ * VMess Response frame, according to Clash implementation, is always attached with a VMess Data frame.
+ */
 guint get_dissect_vmess_response_len(packet_info* pinfo _U_, tvbuff_t* tvb,
     int offset, void* data _U_) {
-    return tvb_get_ntohs(tvb, offset + 38) + 40;
+    return VMESS_RESPONSE_HEADER_LENGTH + VMESS_DATA_HEADER_LENGTH + tvb_get_ntohs(tvb, offset + VMESS_RESPONSE_HEADER_LENGTH);
 }
 
 static gboolean
@@ -632,7 +635,7 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
 
 guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
     int offset, void* data _U_) {
-    return tvb_get_ntohs(tvb, offset) + 2;
+    return tvb_get_ntohs(tvb, offset) + VMESS_DATA_HEADER_LENGTH;
 }
 
 static gboolean
@@ -892,6 +895,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
         return tvb_captured_length(tvb);
     }
 
+
     /* If not a request, all the later dissection is possible only when VMess Request is decrypted successfully */
     if (!conv_data->req_decrypted) {
         return tvb_captured_length(tvb);
@@ -914,18 +918,21 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
             VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
             dissect_vmess_data_pdu, data);
+        vmess_debug_flush();
+
+        return tvb_reported_length(tvb);
     }
     else {
         if (!conv_data->resp_decrypted) {
             tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
-                VMESS_RESPONSE_HEADER_LENGTH,
+                VMESS_RESPONSE_HEADER_LENGTH + VMESS_DATA_HEADER_LENGTH,
                 get_dissect_vmess_response_len,
                 dissect_vmess_response_pdu, data);
         }
         else {
             /* Fetch pinfo */
             /*The response has been decrypted, and the following frames not visited must be data frames */
-            if (!pinfo->fd->visited) { 
+            if (!PINFO_FD_VISITED(pinfo)) {
                 tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
                     VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
                     dissect_vmess_data_pdu, data);
@@ -934,7 +941,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 /* During the second pass, all frames are decrypted, we extract the first byte of the plain data
                 * to check respV to decide whether this frame is response or data frame.
                 */
-                gboolean is_response;
                 vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
                 if (packet) {
                     /* RespV will only appear at the first byte within the first message */
@@ -944,7 +950,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                     if (g_string_equal(respV, conv_data->respV) &&
                         memcmp(msg->plain_data + VMESS_RESPV_LENGTH, "\x00\x00\x00", 3) == 0) {
                         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
-                            VMESS_RESPONSE_HEADER_LENGTH,
+                            VMESS_RESPONSE_HEADER_LENGTH + VMESS_DATA_HEADER_LENGTH,
                             get_dissect_vmess_response_len,
                             dissect_vmess_response_pdu, data);
                     }
@@ -954,11 +960,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                             dissect_vmess_data_pdu, data);
                     }
                     g_string_free(respV, TRUE);
-                }
-                else {
-                    tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
-                        VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
-                        dissect_vmess_data_pdu, data);
                 }
             }
         }

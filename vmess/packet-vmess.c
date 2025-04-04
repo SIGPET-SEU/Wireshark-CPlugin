@@ -336,18 +336,18 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     copy_address_wmem(wmem_file_scope(), &conv_data->srv_addr, &pinfo->dst);
     conv_data->srv_port = pinfo->destport;
 
-    guint offset = 0;
 
     /* If the header packet is decrypted, try to perform decryption */
     if (!conv_data->req_decrypted){
-        gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, offset, conv_data);
+        /* The request itself spans a packet, no need to use offset here */
+        gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, 0, conv_data);
         if (!success) return 0; /* Give up decryption upon failure. */
         conv_data->req_decrypted = TRUE;
     }
 
-    vmess_message_info_t* msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
-    if (!msg)
-        return 0;
+    vmess_message_info_t* msg = get_vmess_message(pinfo, tvb_raw_offset(tvb));
+    //if (!msg)
+    //    return 0;
 
     proto_tree_add_uint(vmess_tree, hf_vmess_request_length, tvb, 0, 0, msg->data_len);
     dissect_decrypted_vmess_request(tvb, pinfo, vmess_tree, msg);

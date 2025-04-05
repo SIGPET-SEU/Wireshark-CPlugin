@@ -71,9 +71,9 @@ typedef enum
 typedef struct ss_cipher
 {
     int method;
-    size_t nonce_len;
-    size_t key_len;
-    size_t tag_len;
+    uint32_t nonce_len;
+    uint32_t key_len;
+    uint32_t tag_len;
     uint8_t key[MAX_KEY_LENGTH];
     gcry_cipher_hd_t hd;
 } ss_cipher_t;
@@ -90,7 +90,7 @@ typedef struct ss_cipher_ctx
 typedef struct ss_crypto
 {
     ss_cipher_t *cipher;
-    int (*const decrypt)(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_t *n, size_t **plen, size_t clen);
+    int (*const decrypt)(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_t *n, uint32_t **plen, uint32_t clen);
     void (*const ctx_init)(ss_cipher_t *, ss_cipher_ctx_t *);
     void (*const ctx_release)(ss_cipher_ctx_t *);
 } ss_crypto_t;
@@ -138,14 +138,14 @@ void ss_cleanup_routine(void);
 /* Conversation */
 ss_conv_data_t *get_ss_conv_data(conversation_t *conversation, const int proto_ss);
 /* Crypto */
-int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t **p, uint8_t *c, uint8_t *n, size_t **plen, size_t clen);
+int ss_aead_decrypt(ss_cipher_ctx_t *ctx, uint8_t **p, uint8_t *c, uint8_t *n, uint32_t **plen, uint32_t clen);
 gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx);
 ss_crypto_t *ss_crypto_init(const char *password, const char *key, const char *method);
 void ss_aead_ctx_init(ss_cipher_t *cipher, ss_cipher_ctx_t *cipher_ctx);
-void ss_aead_ctx_release(ss_cipher_ctx_t *cipher_ctx _U_);
+void ss_aead_ctx_release(ss_cipher_ctx_t *cipher_ctx);
 /* Utils */
 uint16_t load16_be(const void *s);
-void sodium_increment(unsigned char *n, const size_t nlen);
+void sodium_increment(unsigned char *n, const uint32_t nlen);
 int validate_hostname(const char *hostname, const int hostname_len);
 int cmp_list_frame_uint_data(const void *a, const void *b) _U_;
 /* Debugging */
@@ -155,5 +155,5 @@ void debug_print_uint_key_uint_value(const void *key, const void *value, void *u
 void debug_print_uint_key_uint8_array_value(const void *key, const void *value, void *user_data);
 void debug_print_hash_map(wmem_map_t *hash_map, const char *var_name, PrintFunc print_func);
 void debug_print_list(wmem_list_t *list, const char *var_name);
-void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_name);
+void debug_print_uint8_array(const uint8_t *array, uint32_t len, const char *var_name);
 void debug_print_tvb(tvbuff_t *tvb, const char *var_name);

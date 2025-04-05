@@ -37,10 +37,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
-#ifndef __MINGW32__
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#endif
 #endif
 
 #include "packet-shadowsocks.h"
@@ -283,9 +281,9 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     bool is_from_server;
     ss_cipher_ctx_t *cipher_ctx;
     gcry_error_t err;
-    size_t mlen, nlen, tlen;
+    uint32_t mlen, nlen, tlen;
     uint8_t *encrypted_data;
-    size_t len_buf[2];
+    uint32_t len_buf[2];
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -308,7 +306,7 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     nlen = cipher_ctx->cipher->nonce_len;
     tlen = cipher_ctx->cipher->tag_len;
 
-    if ((size_t)tvb_captured_length_remaining(tvb, offset) < CHUNK_SIZE_LEN + tlen)
+    if ((uint32_t)tvb_captured_length_remaining(tvb, offset) < CHUNK_SIZE_LEN + tlen)
     { /* Should not happen */
 #if SS_DEBUG
         ws_critical("[%u] %s: %u < CHUNK_SIZE_LEN(%d) + tlen(%lu)", pinfo->num, __func__, tvb_captured_length_remaining(tvb, offset), CHUNK_SIZE_LEN, tlen);
@@ -342,7 +340,7 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     mlen = mlen & CHUNK_SIZE_MASK;
     if (mlen == 0)
     {
-        ws_critical("[%u] %s: Invalid message length decoded: %lu", pinfo->num, __func__, mlen);
+        ws_critical("[%u] %s: Invalid message length decoded: %u", pinfo->num, __func__, mlen);
         return 1;
     }
 
@@ -486,21 +484,27 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     switch (atyp & ADDRTYPE_MASK)
     {
     case RELAY_HEADER_ATYP_IPV4:
+    {
+        // NOTE: Variable declaration must be in the block
         ws_in4_addr in4_addr = tvb_get_ipv4(tvb, offset);
         host_len = sizeof(struct in_addr);
         proto_tree_add_ipv4(tree, hf_dst_addr_ipv4, tvb, offset, host_len, in4_addr);
         break;
+    }
     case RELAY_HEADER_ATYP_DOMAINNAME:
         host_len = (int)tvb_get_guint8(tvb, offset);
         proto_tree_add_item(tree, hf_dst_addr_domainname_len, tvb, offset++, 1, ENC_BIG_ENDIAN);
         proto_tree_add_item(tree, hf_dst_addr_domainname, tvb, offset, host_len, ENC_ASCII);
         break;
     case RELAY_HEADER_ATYP_IPV6:
+    {
+        // NOTE: Variable declaration must be in the block
         ws_in6_addr *in6_addr = wmem_new0(wmem_file_scope(), ws_in6_addr);
         tvb_get_ipv6(tvb, offset, in6_addr);
         host_len = sizeof(struct in6_addr);
         proto_tree_add_ipv6(tree, hf_dst_addr_ipv6, tvb, offset, host_len, in6_addr);
         break;
+    }
     default:
         // TODO: expert item
         ws_critical("[%u] Invalid ATYP value: %d", pinfo->num, atyp);
@@ -552,7 +556,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
     uint8_t *encrypted_data;
     int err;
     uint8_t *plaintext;
-    size_t *plen;
+    uint32_t *plen;
     ss_packet_info_t *pkt;
     ss_message_info_t *msg;
     ss_message_info_t **pmsgs;
@@ -585,7 +589,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
                              encrypted_data,
                              cipher_ctx->nonce,
                              &plen,
-                             (size_t)(tvb_captured_length(tvb) - offset));
+                             tvb_captured_length(tvb) - offset);
     if (err == RET_CRYPTO_ERROR)
     {
         ws_critical("[%u] %s: Failed to decrypt", pinfo->num, __func__);
@@ -955,13 +959,13 @@ ss_conv_data_t *get_ss_conv_data(conversation_t *conversation, const int proto)
  * @param clen Ciphertext length
  * @return 0 on success and an error code otherwise
  */
-int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_t *n, size_t **plen, size_t clen)
+int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_t *n, uint32_t **plen, uint32_t clen)
 {
     gcry_cipher_hd_t hd;
     gcry_error_t err;
-    size_t mlen, nlen, tlen;
-    size_t len_buf[2];
-    size_t chunk_len;
+    uint32_t mlen, nlen, tlen;
+    uint32_t len_buf[2];
+    uint32_t chunk_len;
     uint8_t *tmp_p;
 
     hd = cipher_ctx->cipher->hd;
@@ -1012,7 +1016,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
     mlen = mlen & CHUNK_SIZE_MASK;
     if (mlen == 0)
     {
-        ws_critical("%s: Invalid message length decoded: %lu", __func__, mlen);
+        ws_critical("%s: Invalid message length decoded: %u", __func__, mlen);
         return RET_CRYPTO_ERROR;
     }
 
@@ -1050,7 +1054,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
 
     sodium_increment(n, nlen);
 
-    *plen = (size_t *)wmem_memdup(wmem_file_scope(), &mlen, sizeof(size_t));
+    *plen = (uint32_t *)wmem_memdup(wmem_file_scope(), &mlen, sizeof(uint32_t));
     *p = (uint8_t *)wmem_memdup(wmem_file_scope(), tmp_p, mlen);
     wmem_free(wmem_file_scope(), tmp_p);
 
@@ -1073,10 +1077,10 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
  * @return 0 on success and an error code otherwise
  */
 gcry_error_t ss_crypto_hkdf(int md_algo,
-                            const unsigned char *salt, int salt_len,
-                            const unsigned char *ikm, int ikm_len,
-                            const unsigned char *info, int info_len,
-                            unsigned char *okm, int okm_len)
+                            const uint8_t *salt, uint32_t salt_len,
+                            const uint8_t *ikm, uint32_t ikm_len,
+                            const uint8_t *info, uint32_t info_len,
+                            uint8_t *okm, uint32_t okm_len)
 {
     gcry_error_t err = GPG_ERR_NO_ERROR;
     unsigned char prk[MAX_MD_SIZE];
@@ -1121,7 +1125,7 @@ gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx)
     err = ss_crypto_hkdf(GCRY_MD_SHA1,
                          cipher_ctx->salt, cipher_ctx->cipher->key_len,
                          cipher_ctx->cipher->key, cipher_ctx->cipher->key_len,
-                         (uint8_t *)SUBKEY_INFO, strlen(SUBKEY_INFO),
+                         (uint8_t *)SUBKEY_INFO, (uint32_t)strlen(SUBKEY_INFO),
                          cipher_ctx->skey, cipher_ctx->cipher->key_len);
     if (err)
     {
@@ -1139,7 +1143,7 @@ gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx)
     return err;
 }
 
-int ss_crypto_parse_key(const char *base64 _U_, uint8_t *key _U_, size_t key_len)
+int ss_crypto_parse_key(const char *base64 _U_, uint8_t *key _U_, uint32_t key_len)
 {
     // TODO
     return key_len;
@@ -1153,7 +1157,7 @@ int ss_crypto_parse_key(const char *base64 _U_, uint8_t *key _U_, size_t key_len
  * @param key_len Length of key
  * @return Length of the key, or 0 on failure
  */
-int ss_crypto_derive_key(const char *pass, uint8_t *key, size_t key_len)
+int ss_crypto_derive_key(const char *pass, uint8_t *key, uint32_t key_len)
 {
     gcry_error_t err = GPG_ERR_NO_ERROR;
     unsigned int i, j;
@@ -1161,7 +1165,7 @@ int ss_crypto_derive_key(const char *pass, uint8_t *key, size_t key_len)
     gcry_md_hd_t c;
     unsigned char md_buf[MAX_MD_SIZE];
     unsigned int mds = gcry_md_get_algo_dlen(GCRY_MD_MD5);
-    size_t datal = strlen((const char *)pass);
+    uint32_t datal = (uint32_t)strlen((const char *)pass);
 
     if (pass == NULL)
         return key_len;
@@ -1350,9 +1354,9 @@ uint16_t load16_be(const void *s)
     return ((uint16_t)in[0] << 8) | ((uint16_t)in[1]);
 }
 
-void sodium_increment(unsigned char *n, const size_t nlen)
+void sodium_increment(unsigned char *n, const uint32_t nlen)
 {
-    size_t i = 0U;
+    uint32_t i = 0U;
     uint_fast16_t c = 1U;
 
 #ifdef HAVE_AMD64_ASM
@@ -1416,7 +1420,7 @@ int validate_hostname(const char *hostname, const int hostname_len)
     const char *label = hostname;
     while (label < hostname + hostname_len)
     {
-        size_t label_len = hostname_len - (label - hostname);
+        uint32_t label_len = (uint32_t)(hostname_len - (label - hostname));
         char *next_dot = strchr(label, '.');
         if (next_dot != NULL)
             label_len = next_dot - label;
@@ -1473,7 +1477,7 @@ void debug_print_uint_key_uint8_array_value(const void *key, const void *value, 
     char tmp[128];
     int offset = snprintf(tmp, sizeof(tmp), "  - %u: ", *(uint32_t *)key);
 
-    for (size_t i = 0; i < 16; i++)
+    for (int i = 0; i < 16; i++)
     {
         offset += snprintf(tmp + offset, sizeof(tmp) - offset, "%02x", ((uint8_t *)value)[i]);
     }
@@ -1495,7 +1499,7 @@ void debug_print_hash_map(wmem_map_t *hash_map, const char *var_name, PrintFunc 
     ws_message("%s", buf);
 }
 
-void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_name)
+void debug_print_uint8_array(const uint8_t *array, uint32_t len, const char *var_name)
 {
     char buf[4096] = {0};
     char tmp[64];
@@ -1503,7 +1507,7 @@ void debug_print_uint8_array(const uint8_t *array, size_t len, const char *var_n
     snprintf(tmp, sizeof(tmp), "[DEBUG] %s: ", var_name);
     strcat(buf, tmp);
 
-    for (size_t i = 0; i < len; i++)
+    for (int i = 0; i < len; i++)
     {
         snprintf(tmp, sizeof(tmp), "%02x", array[i]);
         strcat(buf, tmp);
@@ -1519,7 +1523,7 @@ void debug_print_tvb(tvbuff_t *tvb, const char *var_name)
     snprintf(tmp, sizeof(tmp), "[DEBUG] %s: ", var_name);
     strcat(buf, tmp);
 
-    for (size_t i = 0; i < tvb_captured_length(tvb); i++)
+    for (int i = 0; i < tvb_captured_length(tvb); i++)
     {
         snprintf(tmp, sizeof(tmp), "%02x", tvb_get_guint8(tvb, i));
         strcat(buf, tmp);

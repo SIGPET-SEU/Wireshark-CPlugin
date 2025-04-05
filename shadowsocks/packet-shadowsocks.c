@@ -613,7 +613,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
 
     msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
     msg->plain_data = wmem_memdup(wmem_file_scope(), plaintext, *plen);
-    msg->data_len = (uint32_t) *plen;
+    msg->data_len = *plen;
     msg->id = tvb_raw_offset(tvb) + offset;
     msg->type = (!is_from_server && !conv_data->relay_header_dissection_done) ? SS_RELAY_HEADER : SS_STREAM_DATA;
     msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
@@ -628,7 +628,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
     *pmsgs = msg;
 
     /*** Dissection ***/
-    decrypted_tvb = tvb_new_child_real_data(tvb, plaintext, (guint) *plen, (int) *plen);
+    decrypted_tvb = tvb_new_child_real_data(tvb, plaintext, *plen, *plen);
     add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks Data");
     if (msg->type == SS_RELAY_HEADER)
     {
@@ -1121,7 +1121,7 @@ gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx)
     err = ss_crypto_hkdf(GCRY_MD_SHA1,
                          cipher_ctx->salt, cipher_ctx->cipher->key_len,
                          cipher_ctx->cipher->key, cipher_ctx->cipher->key_len,
-                         (uint8_t *)SUBKEY_INFO, (int) strlen(SUBKEY_INFO),
+                         (uint8_t *)SUBKEY_INFO, strlen(SUBKEY_INFO),
                          cipher_ctx->skey, cipher_ctx->cipher->key_len);
     if (err)
     {
@@ -1139,7 +1139,7 @@ gcry_error_t ss_aead_cipher_ctx_set_key(ss_cipher_ctx_t *cipher_ctx)
     return err;
 }
 
-size_t ss_crypto_parse_key(const char *base64 _U_, uint8_t *key _U_, size_t key_len)
+int ss_crypto_parse_key(const char *base64 _U_, uint8_t *key _U_, size_t key_len)
 {
     // TODO
     return key_len;
@@ -1153,7 +1153,7 @@ size_t ss_crypto_parse_key(const char *base64 _U_, uint8_t *key _U_, size_t key_
  * @param key_len Length of key
  * @return Length of the key, or 0 on failure
  */
-size_t ss_crypto_derive_key(const char *pass, uint8_t *key, size_t key_len)
+int ss_crypto_derive_key(const char *pass, uint8_t *key, size_t key_len)
 {
     gcry_error_t err = GPG_ERR_NO_ERROR;
     unsigned int i, j;
@@ -1218,7 +1218,7 @@ ss_cipher_t *ss_aead_key_init(int method, const char *pass, const char *key)
         return NULL;
     }
     else
-        cipher->key_len = (int) ss_crypto_derive_key(pass, cipher->key, supported_aead_ciphers_key_size[method]);
+        cipher->key_len = ss_crypto_derive_key(pass, cipher->key, supported_aead_ciphers_key_size[method]);
 
     if (cipher->key_len == 0)
     {
@@ -1521,7 +1521,7 @@ void debug_print_tvb(tvbuff_t *tvb, const char *var_name)
 
     for (size_t i = 0; i < tvb_captured_length(tvb); i++)
     {
-        snprintf(tmp, sizeof(tmp), "%02x", tvb_get_guint8(tvb, (int) i));
+        snprintf(tmp, sizeof(tmp), "%02x", tvb_get_guint8(tvb, i));
         strcat(buf, tmp);
     }
     ws_message("%s", buf);

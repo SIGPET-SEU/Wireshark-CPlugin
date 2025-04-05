@@ -1303,6 +1303,10 @@ request_order(int size) {
     if (size < 2) return NULL; /* This should not happen since HMAC requires at least 2 hash handles. */
     guint* tmp, * result;
     result = malloc((1ULL << (size - 1)) * sizeof(guint));
+    if (!result) {
+        vmess_debug_printf("Failed to allocate memory.\n");
+        return NULL;
+    }
     result[0] = 0, result[1] = 1; /* Initializer */
 
     for (int i = 3; i <= size; i++) {

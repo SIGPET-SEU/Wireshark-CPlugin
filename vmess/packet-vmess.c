@@ -1041,7 +1041,7 @@ vmess_compile_keyfile_regex(void)
     return regex;
 }
 
-void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km)
+void vmess_keylog_process_line(const char* data, size_t datalen, vmess_key_map_t* km)
 {
     ws_noisy("vmess process line: %s", data);
 
@@ -1167,8 +1167,8 @@ vmess_decoder_new(int algo, int mode, guchar* key, guchar* iv, guint flags) {
     suite->algo = algo;
     decoder->cipher_suite = suite;
 
-    guint key_len = gcry_cipher_get_algo_keylen(algo);
-    guint iv_len;
+    size_t key_len = gcry_cipher_get_algo_keylen(algo);
+    size_t iv_len;
     switch (mode) {
         // For GCM and POLY1305, bulk length needs to be overwritten.
     case GCRY_CIPHER_MODE_GCM:
@@ -1556,7 +1556,7 @@ void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_dat
 
 #endif
 
-gboolean from_hex(const char* in, GString* out, guint datalen) {
+gboolean from_hex(const char* in, GString* out, size_t datalen) {
     if (datalen & 1) /* The datalen should never be odd */
         return FALSE;
 

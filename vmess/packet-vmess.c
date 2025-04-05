@@ -1563,7 +1563,7 @@ void vmess_debug_print_hash_table(GHashTable* hash_table) {
     g_hash_table_foreach(hash_table, (GHFunc)vmess_debug_print_key_value, NULL);
 }
 
-void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_data) {
+void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_data _U_) {
     vmess_debug_printf("Key: %s, Value: %s\n", (char*)key, (char*)value);
 }
 

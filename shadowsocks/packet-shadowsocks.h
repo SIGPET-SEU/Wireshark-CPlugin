@@ -71,9 +71,9 @@ typedef enum
 typedef struct ss_cipher
 {
     int method;
-    size_t nonce_len;
-    size_t key_len;
-    size_t tag_len;
+    int nonce_len;
+    int key_len;
+    int tag_len;
     uint8_t key[MAX_KEY_LENGTH];
     gcry_cipher_hd_t hd;
 } ss_cipher_t;

@@ -196,8 +196,8 @@ static GString* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
  * @param conv_data     The conversation data related to the current VMess conversation.
  */
 static gboolean
-decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
-    GString* req_key = (GString *)g_hash_table_lookup(vmess_key_map.req_key, conv_data->auth);
+decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
+    GString* req_key = (GString*)g_hash_table_lookup(vmess_key_map.req_key, conv_data->auth);
     if (req_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
         return false; /* Decryption failed */
@@ -215,7 +215,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
      */
     guchar* payloadHeaderLengthAEADNonce = wmem_alloc(wmem_file_scope(), GCM_IV_SIZE);
     guchar* tmp_derived_key;
-    
+
     /* Initialize the request_len_decoder */
     tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
         kdfSaltConstVMessHeaderPayloadLengthAEADKey,
@@ -232,16 +232,16 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     g_free(tmp_derived_key);
 
     conv_data->req_length_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
-                                    payloadHeaderLengthAEADKey, payloadHeaderLengthAEADNonce, 0);
+        payloadHeaderLengthAEADKey, payloadHeaderLengthAEADNonce, 0);
     guint aeadPayloadLengthSize = 2;
     guchar* AEADPayloadLengthSerializedByte = g_malloc(aeadPayloadLengthSize);
 
     gcry_error_t err = vmess_byte_decryption(conv_data->req_length_decoder,
-                                            tvb_get_ptr(tvb, 16, aeadPayloadLengthSize + 16),
-                                            aeadPayloadLengthSize + 16,
-                                            AEADPayloadLengthSerializedByte,
-                                            aeadPayloadLengthSize,
-                                            conv_data->auth->str, conv_data->auth->len);
+        tvb_get_ptr(tvb, 16, aeadPayloadLengthSize + 16),
+        aeadPayloadLengthSize + 16,
+        AEADPayloadLengthSerializedByte,
+        aeadPayloadLengthSize,
+        conv_data->auth->str, conv_data->auth->len);
     if (err != 0) {
         vmess_debug_printf("VMess header length decryption failed: %s.\n", gcry_strsource(err));
         return false; /* Decryption failed */
@@ -296,7 +296,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
     }
 
-    gint record_id = tvb_raw_offset(tvb) + offset;
+    //gint record_id = tvb_raw_offset(tvb) + offset;
     /* Store respV for later use */
     conv_data->respV = wmem_new0(wmem_file_scope(), GString);
     conv_data->respV = g_string_append_len(conv_data->respV, aeadPayload + 1 + 16 + 16, VMESS_RESPV_LENGTH);
@@ -397,8 +397,8 @@ int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tr
 {
     guchar* plaintext = msg->plain_data;
     guint plaintext_len = msg->data_len;
-    proto_item* opt_ti;
-    proto_tree* opt_tree;
+    //proto_item* opt_ti;
+    //proto_tree* opt_tree;
     proto_tree* vmess_tree;
     proto_item* ti;
 
@@ -467,7 +467,7 @@ guint get_dissect_vmess_response_len(packet_info* pinfo _U_, tvbuff_t* tvb,
 }
 
 static gboolean
-decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
+decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
     GString* data_key = (GString*)g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
     if (data_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
@@ -568,7 +568,7 @@ decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guin
         p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
     }
 
-    gint record_id = tvb_raw_offset(tvb) + offset;
+    //gint record_id = tvb_raw_offset(tvb) + offset;
 
     vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
     message->type = VMESS_RESPONSE;
@@ -587,55 +587,6 @@ decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guin
     return TRUE;
 }
 
-int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-    proto_tree* vmess_tree;
-    proto_item* ti;
-    tvbuff_t* next_tvb;
-
-    conversation_t* conversation;
-    vmess_conv_t* conv_data;
-    int offset = 0;
-
-    /* get conversation, create if necessary*/
-    conversation = find_or_create_conversation(pinfo);
-
-    /* get associated state information, create if necessary */
-    conv_data = get_vmess_conv(conversation, proto_vmess);
-
-    /* If the response has not been decrypted yet, one should perform decryption first. */
-    guint response_chunk_length = 38; /* TODO: use macro instead of magic constant */
-    tvbuff_t* response_chunk_tvb = tvb_new_subset_length(tvb, offset, response_chunk_length);
-
-    if (!conv_data->resp_decrypted) {
-        gboolean success = decrypt_vmess_response(response_chunk_tvb, pinfo, tree, 0, conv_data);
-        if (!success) return 0; /* Give up decryption upon failure. */
-        conv_data->resp_decrypted = TRUE;
-    }
-
-    vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(response_chunk_tvb));
-    ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
-
-    offset = dissect_decrypted_vmess_response(response_chunk_tvb, pinfo, tree, resp_msg);
-
-
-    /* If the conversation has been decrypted already, one should check if this is a resp */
-    guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
-    tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
-    if (!PINFO_FD_VISITED(pinfo)) {
-        gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, tree, 0, conv_data);
-        if (!success) return 0; /* Give up decryption upon failure. */
-    }
-    vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
-    offset += dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, data_msg, conv_data);
-
-    return 0;
-}
-
-guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
-    int offset, void* data _U_) {
-    return tvb_get_ntohs(tvb, offset) + VMESS_DATA_HEADER_LENGTH;
-}
-
 static gboolean
 vmess_packet_from_server(vmess_conv_t* conv_data, const packet_info* pinfo) {
     gboolean is_from_server;
@@ -644,27 +595,15 @@ vmess_packet_from_server(vmess_conv_t* conv_data, const packet_info* pinfo) {
     return is_from_server;
 }
 
-gcry_error_t vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len)
-{
-    gcry_error_t err = 0;
-    err = gcry_cipher_reset(decoder->evp);
-    GCRYPT_CHECK(err)
-
-    err = gcry_cipher_setiv(decoder->evp, iv, iv_len);
-    GCRYPT_CHECK(err)
-
-    return err;
-}
-
 /**
  * Decrypt the data packets. According to the Clash implementation, the AEAD encryption maintains the counter
  * to generate the AEAD nonce. Therefore, we have to add the from_server, count_server, and count_client fields
  * to enable AEAD decryption.
- * 
+ *
  * TODO: Calculate the from_server
  */
 static gboolean
-decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
+decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
     GString* data_key = (GString*)g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
     if (data_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
@@ -689,7 +628,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         /* NOTE: data_iv->str is 16 bytes long, and AES-128-GCM only uses the first 12 bytes of it. */
         if (!conv_data->srv_data_decoder) {
             /**
-             * NOTE: According to the Clash implementation, the server side key and iv are actually the 
+             * NOTE: According to the Clash implementation, the server side key and iv are actually the
              * SHA256-hashed version of those used in the client side. This seems to violate the VMess
              * protocol spec, but we still follow the Clash implementation in current dissection.
              * VMess spec: https://xtls.github.io/development/protocols/vmess.html
@@ -706,7 +645,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
 
 
             conv_data->srv_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
-                                            srv_data_key, srv_data_iv, 0);
+                srv_data_key, srv_data_iv, 0);
             gcry_md_close(srv_data_key_hd);
             gcry_md_close(srv_data_iv_hd);
         }
@@ -766,7 +705,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
     }
 
-    gint record_id = tvb_raw_offset(tvb) + offset;
+    //gint record_id = tvb_raw_offset(tvb) + offset;
 
     vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
     message->type = VMESS_DATA;
@@ -781,6 +720,69 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
     *pmessages = message; /* Append to the tail */
 
     return TRUE;
+}
+
+int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+    //proto_tree* vmess_tree;
+    //proto_item* ti;
+    //tvbuff_t* next_tvb;
+
+    conversation_t* conversation;
+    vmess_conv_t* conv_data;
+    int offset = 0;
+
+    /* get conversation, create if necessary*/
+    conversation = find_or_create_conversation(pinfo);
+
+    /* get associated state information, create if necessary */
+    conv_data = get_vmess_conv(conversation, proto_vmess);
+
+    /* If the response has not been decrypted yet, one should perform decryption first. */
+    guint response_chunk_length = 38; /* TODO: use macro instead of magic constant */
+    tvbuff_t* response_chunk_tvb = tvb_new_subset_length(tvb, offset, response_chunk_length);
+
+    if (!conv_data->resp_decrypted) {
+        gboolean success = decrypt_vmess_response(response_chunk_tvb, pinfo, 0, conv_data);
+        if (!success) return 0; /* Give up decryption upon failure. */
+        conv_data->resp_decrypted = TRUE;
+    }
+
+    vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(response_chunk_tvb));
+    ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
+
+    offset = dissect_decrypted_vmess_response(response_chunk_tvb, pinfo, tree, resp_msg);
+
+
+    /* If the conversation has been decrypted already, one should check if this is a resp */
+    while (tvb_reported_length_remaining(tvb, offset) > 0) {
+        guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
+        tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
+        if (!pinfo->fd->visited) {
+            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, 0, conv_data);
+            if (!success) return 0; /* Give up decryption upon failure. */
+        }
+        vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
+        offset += dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, data_msg, conv_data);
+    }
+
+    return 0;
+}
+
+guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
+    int offset, void* data _U_) {
+    return tvb_get_ntohs(tvb, offset) + 2;
+}
+
+gcry_error_t vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len)
+{
+    gcry_error_t err = 0;
+    err = gcry_cipher_reset(decoder->evp);
+    GCRYPT_CHECK(err)
+
+    err = gcry_cipher_setiv(decoder->evp, iv, iv_len);
+    GCRYPT_CHECK(err)
+
+    return err;
 }
 
 int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
@@ -834,8 +836,8 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 {
     conversation_t* conversation;
     vmess_conv_t* conv_data = NULL;
-    port_type save_port_type;
-    guint16 save_can_desegment;
+    //port_type save_port_type;
+    //guint16 save_can_desegment;
 
     /* get conversation, create if necessary*/
     conversation = find_or_create_conversation(pinfo);
@@ -1046,7 +1048,7 @@ vmess_compile_keyfile_regex(void)
     return regex;
 }
 
-void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km)
+void vmess_keylog_process_line(const char* data, size_t datalen, vmess_key_map_t* km)
 {
     ws_noisy("vmess process line: %s", data);
 
@@ -1172,8 +1174,8 @@ vmess_decoder_new(int algo, int mode, guchar* key, guchar* iv, guint flags) {
     suite->algo = algo;
     decoder->cipher_suite = suite;
 
-    guint key_len = gcry_cipher_get_algo_keylen(algo);
-    guint iv_len;
+    size_t key_len = gcry_cipher_get_algo_keylen(algo);
+    size_t iv_len;
     switch (mode) {
         // For GCM and POLY1305, bulk length needs to be overwritten.
     case GCRY_CIPHER_MODE_GCM:
@@ -1307,7 +1309,11 @@ static guint*
 request_order(int size) {
     if (size < 2) return NULL; /* This should not happen since HMAC requires at least 2 hash handles. */
     guint* tmp, * result;
-    result = malloc((1 << (size - 1)) * sizeof(guint));
+    result = malloc((1ULL << (size - 1)) * sizeof(guint));
+    if (!result) {
+        vmess_debug_printf("Failed to allocate memory.\n");
+        return NULL;
+    }
     result[0] = 0, result[1] = 1; /* Initializer */
 
     for (int i = 3; i <= size; i++) {
@@ -1329,12 +1335,21 @@ HMACDigester* hmac_digester_new(HMACCreator* creator) {
 
     /* Create handler array */
     HMACDigester* digester = malloc(sizeof(HMACDigester));
-    int size = 1; // creator->h_in
+    if (!digester) {
+        ws_warning("Failed to create HMACDigester");
+        return NULL;
+    }
+    
+    uint32_t size = 1; // creator->h_in
     for (HMACCreator* p = creator; p; p = p->parent)
         size++; // All other hash handles needed are p->h_out
 
     digester->size = size;
     digester->head = malloc(size * sizeof(gcry_md_hd_t*));
+    if (!digester->head) {
+        ws_warning("Failed to create head hash handle for HMACDigester");
+        return NULL;
+    }
 
     digester->head[0] = malloc(sizeof(gcry_md_hd_t));
     gcry_md_copy(digester->head[0], *creator->h_in);
@@ -1391,7 +1406,7 @@ hmac_digest_on_copy(gcry_md_hd_t hd, const guchar* msg, gssize msg_len, guchar* 
     return err;
 }
 
-guchar* vmess_kdf(const guchar* key, guint key_len, guint num, ...) {
+guchar* vmess_kdf(const guchar* key, gsize key_len, guint num, ...) {
 
     HMACCreator* creator = hmac_creator_new(NULL,
         (const guchar*)kdfSaltConstVMessAEADKDF->str,
@@ -1555,13 +1570,13 @@ void vmess_debug_print_hash_table(GHashTable* hash_table) {
     g_hash_table_foreach(hash_table, (GHFunc)vmess_debug_print_key_value, NULL);
 }
 
-void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_data) {
+void vmess_debug_print_key_value(gpointer key, gpointer value, gpointer user_data _U_) {
     vmess_debug_printf("Key: %s, Value: %s\n", (char*)key, (char*)value);
 }
 
 #endif
 
-gboolean from_hex(const char* in, GString* out, guint datalen) {
+gboolean from_hex(const char* in, GString* out, size_t datalen) {
     if (datalen & 1) /* The datalen should never be odd */
         return FALSE;
 

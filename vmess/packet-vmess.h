@@ -205,7 +205,7 @@ void vmess_keylog_remove(vmess_key_map_t* mk);
  */
 void vmess_keylog_reset(void);
 
-void vmess_keylog_process_line(const char* data, const guint8 datalen, vmess_key_map_t* km);
+void vmess_keylog_process_line(const char* data, size_t datalen, vmess_key_map_t* km);
 
 /*
  * Must be called before attempting decryption.
@@ -266,7 +266,7 @@ vmess_cipher_init(gcry_cipher_hd_t* hd, int algo, int mode, guchar* key, gsize k
  * @return guchar*      The derived key byte buffer
  */
 guchar*
-vmess_kdf(const guchar* key, guint key_len, guint num, ...);
+vmess_kdf(const guchar* key, gsize key_len, guint num, ...);
 
 gcry_error_t
 vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, guchar* out, gsize outl, const guchar* ad, gsize ad_len);
@@ -426,7 +426,7 @@ put_uint16_le(uint16_t value, unsigned char* buffer);
  *
  * @return  TRUE if succeeded, FALSE otherwise.
  */
-gboolean from_hex(const char* in, GString* out, guint datalen);
+gboolean from_hex(const char* in, GString* out, size_t datalen);
 
 /**
  * This is the raw char* version of from_hex, used for handling the raw bytes

@@ -340,7 +340,7 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     /* If the header packet is decrypted, try to perform decryption */
     if (!conv_data->req_decrypted){
         /* The request itself spans a packet, no need to use offset here */
-        gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, 0, conv_data);
+        gboolean success = decrypt_vmess_request(tvb, pinfo, 0, conv_data);
         if (!success) return 0; /* Give up decryption upon failure. */
         conv_data->req_decrypted = TRUE;
     }
@@ -807,7 +807,7 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
     tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
     if (!PINFO_FD_VISITED(pinfo)) {
-        gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, tree, 0, conv_data);
+        gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, 0, conv_data);
         if (!success) return 0; /* Give up decryption upon failure. */
     }
     vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));

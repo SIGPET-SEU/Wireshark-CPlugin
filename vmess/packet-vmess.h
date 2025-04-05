@@ -266,7 +266,7 @@ vmess_cipher_init(gcry_cipher_hd_t* hd, int algo, int mode, guchar* key, gsize k
  * @return guchar*      The derived key byte buffer
  */
 guchar*
-vmess_kdf(const guchar* key, guint key_len, guint num, ...);
+vmess_kdf(const guchar* key, gsize key_len, guint num, ...);
 
 gcry_error_t
 vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, guchar* out, gsize outl, const guchar* ad, gsize ad_len);

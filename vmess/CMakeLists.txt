@@ -35,6 +35,7 @@ register_plugin_files(plugin.c
 add_wireshark_plugin_library(vmess epan)
 
 target_link_libraries(vmess epan)
+target_link_libraries(vmess ${GCRYPT_LIBRARIES})
 
 install_plugin(vmess epan)
 

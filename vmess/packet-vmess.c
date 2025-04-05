@@ -218,16 +218,12 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     
     /* Initialize the request_len_decoder */
     tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
-        kdfSaltConstVMessHeaderPayloadLengthAEADKey,
-        conv_data->auth,
-        req_iv);
+        kdfSaltConstVMessHeaderPayloadLengthAEADKey);
     memcpy(payloadHeaderLengthAEADKey, tmp_derived_key, AES_128_KEY_SIZE);
     g_free(tmp_derived_key);
 
     tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
-        kdfSaltConstVMessHeaderPayloadLengthAEADIV,
-        conv_data->auth,
-        req_iv);
+        kdfSaltConstVMessHeaderPayloadLengthAEADIV);
     memcpy(payloadHeaderLengthAEADNonce, tmp_derived_key, GCM_IV_SIZE);
     g_free(tmp_derived_key);
 
@@ -259,16 +255,12 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
     guchar* payloadHeaderAEADNonce = wmem_alloc(wmem_file_scope(), GCM_IV_SIZE);
     /* Initialize the request_len_decoder */
     tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
-        kdfSaltConstVMessHeaderPayloadAEADKey,
-        conv_data->auth,
-        req_iv);
+        kdfSaltConstVMessHeaderPayloadAEADKey);
     memcpy(payloadHeaderAEADKey, tmp_derived_key, AES_128_KEY_SIZE);
     g_free(tmp_derived_key);
 
     tmp_derived_key = vmess_kdf(req_key->str, req_key->len, 3,
-        kdfSaltConstVMessHeaderPayloadAEADIV,
-        conv_data->auth,
-        req_iv);
+        kdfSaltConstVMessHeaderPayloadAEADIV);
     memcpy(payloadHeaderAEADNonce, tmp_derived_key, GCM_IV_SIZE);
     g_free(tmp_derived_key);
 
@@ -1394,7 +1386,7 @@ hmac_digest_on_copy(gcry_md_hd_t hd, const guchar* msg, gssize msg_len, guchar* 
     return err;
 }
 
-guchar* vmess_kdf(const guchar* key, guint key_len, guint num, ...) {
+guchar* vmess_kdf(const guchar* key, gsize key_len, guint num, ...) {
 
     HMACCreator* creator = hmac_creator_new(NULL,
         (const guchar*)kdfSaltConstVMessAEADKDF->str,

@@ -35,6 +35,7 @@ register_plugin_files(plugin.c
 add_wireshark_plugin_library(shadowsocks epan)
 
 target_link_libraries(shadowsocks epan)
+target_link_libraries(shadowsocks ${GCRYPT_LIBRARIES})
 
 install_plugin(shadowsocks epan)
 

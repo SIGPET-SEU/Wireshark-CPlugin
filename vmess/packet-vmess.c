@@ -196,7 +196,7 @@ static GString* kdfSaltConstVMessHeaderPayloadLengthAEADIV;
  * @param conv_data     The conversation data related to the current VMess conversation.
  */
 static gboolean
-decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
+decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
     GString* req_key = (GString *)g_hash_table_lookup(vmess_key_map.req_key, conv_data->auth);
     if (req_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
@@ -288,7 +288,7 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint
         p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
     }
 
-    gint record_id = tvb_raw_offset(tvb) + offset;
+    //gint record_id = tvb_raw_offset(tvb) + offset;
     /* Store respV for later use */
     conv_data->respV = wmem_new0(wmem_file_scope(), GString);
     conv_data->respV = g_string_append_len(conv_data->respV, aeadPayload + 1 + 16 + 16, VMESS_RESPV_LENGTH);
@@ -332,7 +332,7 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
 
     /* If the header packet is decrypted, try to perform decryption */
     if (!conv_data->req_decrypted){
-        gboolean success = decrypt_vmess_request(tvb, pinfo, vmess_tree, offset, conv_data);
+        gboolean success = decrypt_vmess_request(tvb, pinfo, offset, conv_data);
         if (!success) return 0; /* Give up decryption upon failure. */
         conv_data->req_decrypted = TRUE;
     }
@@ -389,8 +389,8 @@ int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tr
 {
     guchar* plaintext = msg->plain_data;
     guint plaintext_len = msg->data_len;
-    proto_item* opt_ti;
-    proto_tree* opt_tree;
+    //proto_item* opt_ti;
+    //proto_tree* opt_tree;
     proto_tree* vmess_tree;
     proto_item* ti;
 
@@ -456,7 +456,7 @@ guint get_dissect_vmess_response_len(packet_info* pinfo _U_, tvbuff_t* tvb,
 }
 
 static gboolean
-decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
+decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
     GString* data_key = (GString*)g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
     if (data_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
@@ -557,7 +557,7 @@ decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guin
         p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
     }
 
-    gint record_id = tvb_raw_offset(tvb) + offset;
+    //gint record_id = tvb_raw_offset(tvb) + offset;
 
     vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
     message->type = VMESS_RESPONSE;
@@ -576,57 +576,6 @@ decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guin
     return TRUE;
 }
 
-int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-    proto_tree* vmess_tree;
-    proto_item* ti;
-    tvbuff_t* next_tvb;
-
-    conversation_t* conversation;
-    vmess_conv_t* conv_data;
-    int offset = 0;
-
-    /* get conversation, create if necessary*/
-    conversation = find_or_create_conversation(pinfo);
-
-    /* get associated state information, create if necessary */
-    conv_data = get_vmess_conv(conversation, proto_vmess);
-
-    /* If the response has not been decrypted yet, one should perform decryption first. */
-    guint response_chunk_length = 38; /* TODO: use macro instead of magic constant */
-    tvbuff_t* response_chunk_tvb = tvb_new_subset_length(tvb, offset, response_chunk_length);
-
-    if (!conv_data->resp_decrypted) {
-        gboolean success = decrypt_vmess_response(response_chunk_tvb, pinfo, tree, 0, conv_data);
-        if (!success) return 0; /* Give up decryption upon failure. */
-        conv_data->resp_decrypted = TRUE;
-    }
-
-    vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(response_chunk_tvb));
-    ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
-
-    offset = dissect_decrypted_vmess_response(response_chunk_tvb, pinfo, tree, resp_msg);
-
-
-    /* If the conversation has been decrypted already, one should check if this is a resp */
-    while (tvb_reported_length_remaining(tvb, offset) > 0) {
-        guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
-        tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
-        if (!pinfo->fd->visited) {
-            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, tree, 0, conv_data);
-            if (!success) return 0; /* Give up decryption upon failure. */
-        }
-        vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
-        offset += dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, data_msg, conv_data);
-    }
-
-    return 0;
-}
-
-guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
-    int offset, void* data _U_) {
-    return tvb_get_ntohs(tvb, offset) + 2;
-}
-
 static gboolean
 vmess_packet_from_server(vmess_conv_t* conv_data, const packet_info* pinfo) {
     gboolean is_from_server;
@@ -635,23 +584,11 @@ vmess_packet_from_server(vmess_conv_t* conv_data, const packet_info* pinfo) {
     return is_from_server;
 }
 
-gcry_error_t vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len)
-{
-    gcry_error_t err = 0;
-    err = gcry_cipher_reset(decoder->evp);
-    GCRYPT_CHECK(err)
-
-    err = gcry_cipher_setiv(decoder->evp, iv, iv_len);
-    GCRYPT_CHECK(err)
-
-    return err;
-}
-
 /**
  * Decrypt the data packets. According to the Clash implementation, the AEAD encryption maintains the counter
  * to generate the AEAD nonce. Therefore, we have to add the from_server, count_server, and count_client fields
  * to enable AEAD decryption.
- * 
+ *
  * TODO: Calculate the from_server
  */
 static gboolean
@@ -680,7 +617,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         /* NOTE: data_iv->str is 16 bytes long, and AES-128-GCM only uses the first 12 bytes of it. */
         if (!conv_data->srv_data_decoder) {
             /**
-             * NOTE: According to the Clash implementation, the server side key and iv are actually the 
+             * NOTE: According to the Clash implementation, the server side key and iv are actually the
              * SHA256-hashed version of those used in the client side. This seems to violate the VMess
              * protocol spec, but we still follow the Clash implementation in current dissection.
              * VMess spec: https://xtls.github.io/development/protocols/vmess.html
@@ -697,7 +634,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
 
 
             conv_data->srv_data_decoder = vmess_decoder_new(GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_GCM,
-                                            srv_data_key, srv_data_iv, 0);
+                srv_data_key, srv_data_iv, 0);
             gcry_md_close(srv_data_key_hd);
             gcry_md_close(srv_data_iv_hd);
         }
@@ -772,6 +709,69 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
     *pmessages = message; /* Append to the tail */
 
     return TRUE;
+}
+
+int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+    proto_tree* vmess_tree;
+    proto_item* ti;
+    tvbuff_t* next_tvb;
+
+    conversation_t* conversation;
+    vmess_conv_t* conv_data;
+    int offset = 0;
+
+    /* get conversation, create if necessary*/
+    conversation = find_or_create_conversation(pinfo);
+
+    /* get associated state information, create if necessary */
+    conv_data = get_vmess_conv(conversation, proto_vmess);
+
+    /* If the response has not been decrypted yet, one should perform decryption first. */
+    guint response_chunk_length = 38; /* TODO: use macro instead of magic constant */
+    tvbuff_t* response_chunk_tvb = tvb_new_subset_length(tvb, offset, response_chunk_length);
+
+    if (!conv_data->resp_decrypted) {
+        gboolean success = decrypt_vmess_response(response_chunk_tvb, pinfo, 0, conv_data);
+        if (!success) return 0; /* Give up decryption upon failure. */
+        conv_data->resp_decrypted = TRUE;
+    }
+
+    vmess_message_info_t* resp_msg = get_vmess_message(pinfo, tvb_raw_offset(response_chunk_tvb));
+    ws_assert(resp_msg != NULL); /* resp_msg MUST NOT be null if code reaches here */
+
+    offset = dissect_decrypted_vmess_response(response_chunk_tvb, pinfo, tree, resp_msg);
+
+
+    /* If the conversation has been decrypted already, one should check if this is a resp */
+    while (tvb_reported_length_remaining(tvb, offset) > 0) {
+        guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
+        tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
+        if (!pinfo->fd->visited) {
+            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, tree, 0, conv_data);
+            if (!success) return 0; /* Give up decryption upon failure. */
+        }
+        vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
+        offset += dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, data_msg, conv_data);
+    }
+
+    return 0;
+}
+
+guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
+    int offset, void* data _U_) {
+    return tvb_get_ntohs(tvb, offset) + 2;
+}
+
+gcry_error_t vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len)
+{
+    gcry_error_t err = 0;
+    err = gcry_cipher_reset(decoder->evp);
+    GCRYPT_CHECK(err)
+
+    err = gcry_cipher_setiv(decoder->evp, iv, iv_len);
+    GCRYPT_CHECK(err)
+
+    return err;
 }
 
 int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {

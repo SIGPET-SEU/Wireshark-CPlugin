@@ -592,7 +592,7 @@ vmess_packet_from_server(vmess_conv_t* conv_data, const packet_info* pinfo) {
  * TODO: Calculate the from_server
  */
 static gboolean
-decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 offset, vmess_conv_t* conv_data) {
+decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv_t* conv_data) {
     GString* data_key = (GString*)g_hash_table_lookup(vmess_key_map.data_key, conv_data->auth);
     if (data_key == NULL) {
         vmess_debug_printf("VMess key not found, impossible to decrypt.\n");
@@ -694,7 +694,7 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
         p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
     }
 
-    gint record_id = tvb_raw_offset(tvb) + offset;
+    //gint record_id = tvb_raw_offset(tvb) + offset;
 
     vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
     message->type = VMESS_DATA;
@@ -712,9 +712,9 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, guint32 
 }
 
 int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-    proto_tree* vmess_tree;
-    proto_item* ti;
-    tvbuff_t* next_tvb;
+    //proto_tree* vmess_tree;
+    //proto_item* ti;
+    //tvbuff_t* next_tvb;
 
     conversation_t* conversation;
     vmess_conv_t* conv_data;
@@ -747,7 +747,7 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
         guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
         tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
         if (!pinfo->fd->visited) {
-            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, tree, 0, conv_data);
+            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, 0, conv_data);
             if (!success) return 0; /* Give up decryption upon failure. */
         }
         vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
@@ -797,7 +797,7 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
         guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
         tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
         if (!pinfo->fd->visited) {
-            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, tree, 0, conv_data);
+            gboolean success = decrypt_vmess_data(data_chunk_tvb, pinfo, 0, conv_data);
             if (!success) return 0; /* Give up decryption upon failure. */
         }
         vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
@@ -827,8 +827,8 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 {
     conversation_t* conversation;
     vmess_conv_t* conv_data = NULL;
-    port_type save_port_type;
-    guint16 save_can_desegment;
+    //port_type save_port_type;
+    //guint16 save_can_desegment;
 
     /* get conversation, create if necessary*/
     conversation = find_or_create_conversation(pinfo);
@@ -926,7 +926,7 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 /* During the second pass, all frames are decrypted, we extract the first byte of the plain data
                 * to check respV to decide whether this frame is response or data frame.
                 */
-                gboolean is_response;
+                //gboolean is_response;
                 vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
                 if (packet) {
                     /* RespV will only appear at the first byte within the first message */

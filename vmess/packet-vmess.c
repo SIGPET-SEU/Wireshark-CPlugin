@@ -1328,12 +1328,21 @@ HMACDigester* hmac_digester_new(HMACCreator* creator) {
 
     /* Create handler array */
     HMACDigester* digester = malloc(sizeof(HMACDigester));
-    int size = 1; // creator->h_in
+    if (!digester) {
+        ws_warning("Failed to create HMACDigester");
+        return NULL;
+    }
+    
+    uint32_t size = 1; // creator->h_in
     for (HMACCreator* p = creator; p; p = p->parent)
         size++; // All other hash handles needed are p->h_out
 
     digester->size = size;
     digester->head = malloc(size * sizeof(gcry_md_hd_t*));
+    if (!digester->head) {
+        ws_warning("Failed to create head hash handle for HMACDigester");
+        return NULL;
+    }
 
     digester->head[0] = malloc(sizeof(gcry_md_hd_t));
     gcry_md_copy(digester->head[0], *creator->h_in);

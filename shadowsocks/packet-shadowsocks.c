@@ -283,7 +283,7 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     gcry_error_t err;
     uint32_t mlen, nlen, tlen;
     uint8_t *encrypted_data;
-    uint32_t len_buf[2];
+    uint8_t *len_buf;
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -327,6 +327,8 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
         ws_critical("[%u] %s: Failed to set nonce: %s", pinfo->num, __func__, gcry_strerror(err));
         return 1;
     }
+
+    len_buf = (uint8_t *)wmem_alloc0(wmem_file_scope(), CHUNK_SIZE_LEN + tlen);
     encrypted_data = (uint8_t *)tvb_memdup(wmem_file_scope(), tvb, offset, CHUNK_SIZE_LEN + tlen);
     // NOTE: The `outsize` should always be expected length + tag length
     err = gcry_cipher_decrypt(cipher_ctx->cipher->hd, len_buf, CHUNK_SIZE_LEN + tlen, encrypted_data, CHUNK_SIZE_LEN + tlen);
@@ -343,6 +345,8 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
         ws_critical("[%u] %s: Invalid message length decoded: %u", pinfo->num, __func__, mlen);
         return 1;
     }
+
+    // TODO: free
 
     // NOTE: encrypted payload length(2) | length tag(tlen) | encrypted payload(plen) | payload tag(tlen)
     return (unsigned)(CHUNK_SIZE_LEN + tlen + mlen + tlen);
@@ -964,7 +968,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
     gcry_cipher_hd_t hd;
     gcry_error_t err;
     uint32_t mlen, nlen, tlen;
-    uint32_t len_buf[2];
+    uint8_t *len_buf;
     uint32_t chunk_len;
     uint8_t *tmp_p;
 
@@ -1004,6 +1008,8 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
         ws_critical("%s: Failed to set nonce: %s", __func__, gcry_strerror(err));
         return RET_CRYPTO_ERROR;
     }
+
+    len_buf = (uint8_t *)wmem_alloc0(wmem_file_scope(), CHUNK_SIZE_LEN + tlen);
     // NOTE: The `outsize` should always be expected length + tag length
     err = gcry_cipher_decrypt(hd, len_buf, CHUNK_SIZE_LEN + tlen, c, CHUNK_SIZE_LEN + tlen);
     if (err)
@@ -1056,6 +1062,8 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
 
     *plen = (uint32_t *)wmem_memdup(wmem_file_scope(), &mlen, sizeof(uint32_t));
     *p = (uint8_t *)wmem_memdup(wmem_file_scope(), tmp_p, mlen);
+
+    // TODO: free
     wmem_free(wmem_file_scope(), tmp_p);
 
     return RET_OK;

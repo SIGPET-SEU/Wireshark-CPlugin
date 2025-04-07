@@ -296,7 +296,6 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_c
         p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
     }
 
-    //gint record_id = tvb_raw_offset(tvb) + offset;
     /* Store respV for later use */
     conv_data->respV = wmem_new0(wmem_file_scope(), GString);
     conv_data->respV = g_string_append_len(conv_data->respV, aeadPayload + 1 + 16 + 16, VMESS_RESPV_LENGTH);
@@ -346,8 +345,6 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
     }
 
     vmess_message_info_t* msg = get_vmess_message(pinfo, tvb_raw_offset(tvb));
-    //if (!msg)
-    //    return 0;
 
     proto_tree_add_uint(vmess_tree, hf_vmess_request_length, tvb, 0, 0, msg->data_len);
     dissect_decrypted_vmess_request(tvb, pinfo, vmess_tree, msg);
@@ -448,7 +445,7 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
     pinfo->can_desegment = pinfo->saved_can_desegment;
 
     reassemble_streaming_data_and_call_subdissector(packet_tvb, pinfo, 0, tvb_reported_length_remaining(packet_tvb, 0),
-        vmess_tree, tree, proto_vmess_streaming_reassembly_table,
+        vmess_tree, proto_tree_get_parent_tree(vmess_tree), proto_vmess_streaming_reassembly_table,
         conv_data->reassembly_info, get_virtual_frame_num64(packet_tvb, pinfo, 0), tls_handle,
         proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
 
@@ -617,7 +614,6 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv
 
     gboolean is_from_server = vmess_packet_from_server(conv_data, pinfo);
 
-    /* TODO: Perform decryption */
     guint16 data_length = tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
 
     guint16 plaintext_len = data_length - 16; /* ONLY works for AES-128-GCM */
@@ -705,7 +701,6 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv
         p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
     }
 
-    //gint record_id = tvb_raw_offset(tvb) + offset;
 
     vmess_message_info_t* message = wmem_new0(wmem_file_scope(), vmess_message_info_t);
     message->type = VMESS_DATA;
@@ -723,9 +718,6 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv
 }
 
 int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-    //proto_tree* vmess_tree;
-    //proto_item* ti;
-    //tvbuff_t* next_tvb;
 
     conversation_t* conversation;
     vmess_conv_t* conv_data;
@@ -796,14 +788,6 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     /* get associated state information, create if necessary */
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
-    //col_set_str(pinfo->cinfo, COL_INFO, "VMESS Data");
-    //col_set_str(pinfo->cinfo, COL_PROTOCOL, "VMess");
-    //ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
-    //vmess_tree = proto_item_add_subtree(ti, ett_vmess);
-    
-    /* TODO: Perform decryption on the tvb */
-    //guint16 payload_length = tvb_get_guint16(tvb, 0, ENC_BIG_ENDIAN);
-
     guint data_chunk_length = VMESS_DATA_HEADER_LENGTH + tvb_get_guint16(tvb, offset, ENC_BIG_ENDIAN);
     tvbuff_t* data_chunk_tvb = tvb_new_subset_length(tvb, offset, data_chunk_length);
     if (!PINFO_FD_VISITED(pinfo)) {
@@ -816,19 +800,6 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     }
     offset += data_chunk_length;
 
-    //if (!pinfo->fd->visited) { // Only try decryption once.
-    //    gboolean success = decrypt_vmess_data(tvb, pinfo, tree, offset, conv_data);
-    //    if (!success) {
-    //        vmess_debug_printf("VMess data decryption failed, higher level dissection is impossible.\n");
-    //    }
-    //}
-    //
-    //vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(tvb) + offset);
-    //if (!data_msg)
-    //    return 0;
-
-    //dissect_decrypted_vmess_data(tvb, pinfo, tree, data_msg, conv_data);
-
     return 0;
 }
 
@@ -836,8 +807,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 {
     conversation_t* conversation;
     vmess_conv_t* conv_data = NULL;
-    //port_type save_port_type;
-    //guint16 save_can_desegment;
 
     /* get conversation, create if necessary*/
     conversation = find_or_create_conversation(pinfo);
@@ -1862,7 +1831,6 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess
     conv_data->cli_data_decoder = NULL;
     conv_data->count_reader = 0;
     conv_data->count_writer = 0;
-    //conv_data->auth_missing = FALSE;
 
     /* Defer the port and address initialization to dissect VMess Request */
 

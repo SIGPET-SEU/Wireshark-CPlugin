@@ -1431,7 +1431,7 @@ int validate_hostname(const char *hostname, const int hostname_len)
         uint32_t label_len = (uint32_t)(hostname_len - (label - hostname));
         char *next_dot = strchr(label, '.');
         if (next_dot != NULL)
-            label_len = next_dot - label;
+            label_len = (uint32_t)(next_dot - label);
 
         if (label + label_len > hostname + hostname_len)
             return 0;

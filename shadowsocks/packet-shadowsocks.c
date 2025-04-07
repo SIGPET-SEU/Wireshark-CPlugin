@@ -189,7 +189,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     ss_cipher_ctx_t *cipher_ctx;
     ss_packet_info_t *pkt;
     ss_message_info_t *msg;
-    tvbuff_t *sub_tvb;
+    tvbuff_t *next_tvb;
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -250,17 +250,17 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
             proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, msg->nonce, cipher_ctx->cipher->nonce_len);
         if (msg->type == SS_SALT)
         {
-            sub_tvb = tvb_new_subset_length_caplen(tvb, msg->id - tvb_raw_offset(tvb), msg->data_len, msg->data_len);
-            dissect_ss_salt(sub_tvb, pinfo, ss_tree, NULL);
+            next_tvb = tvb_new_subset_length_caplen(tvb, msg->id - tvb_raw_offset(tvb), msg->data_len, msg->data_len);
+            dissect_ss_salt(next_tvb, pinfo, ss_tree, NULL);
         }
         else
         {
-            sub_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->data_len, msg->data_len);
-            add_new_data_source(pinfo, sub_tvb, "Decrypted Shadowsocks Data");
+            next_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->data_len, msg->data_len);
+            add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Data");
             if (msg->type == SS_RELAY_HEADER)
-                dissect_ss_relay_header(sub_tvb, pinfo, ss_tree, NULL);
+                dissect_ss_relay_header(next_tvb, pinfo, ss_tree, NULL);
             else if (msg->type == SS_STREAM_DATA)
-                dissect_ss_stream_data(sub_tvb, pinfo, tree, NULL); // FIXME: Should the 3rd parameter be `tree` or `ss_tree`?
+                dissect_ss_stream_data(next_tvb, pinfo, tree, NULL); // FIXME: Should the 3rd parameter be `tree` or `ss_tree`?
             else
                 col_append_str(pinfo->cinfo, COL_INFO, "[Unknown]");
         }
@@ -271,7 +271,7 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
 unsigned get_ss_salt_len(packet_info *pinfo _U_, tvbuff_t *tvb _U_, int offset _U_, void *data _U_)
 {
-    return (unsigned)ss_crypto->cipher->key_len;
+    return ss_crypto->cipher->key_len;
 }
 
 unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data _U_)
@@ -306,7 +306,7 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     nlen = cipher_ctx->cipher->nonce_len;
     tlen = cipher_ctx->cipher->tag_len;
 
-    if ((uint32_t)tvb_captured_length_remaining(tvb, offset) < CHUNK_SIZE_LEN + tlen)
+    if (tvb_captured_length_remaining(tvb, offset) < (int)(CHUNK_SIZE_LEN + tlen))
     { /* Should not happen */
 #if SS_DEBUG
         ws_critical("[%u] %s: %u < CHUNK_SIZE_LEN(%d) + tlen(%lu)", pinfo->num, __func__, tvb_captured_length_remaining(tvb, offset), CHUNK_SIZE_LEN, tlen);
@@ -352,7 +352,7 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     return (unsigned)(CHUNK_SIZE_LEN + tlen + mlen + tlen);
 }
 
-unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data)
+unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data _U_)
 {
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
@@ -374,9 +374,9 @@ unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void 
 
     /*** Return Length ***/
     if (!cipher_ctx->init)
-        return get_ss_salt_len(pinfo, tvb, offset, data);
+        return get_ss_salt_len(pinfo, tvb, offset, NULL);
     else
-        return get_ss_encrypted_data_len(pinfo, tvb, offset, data);
+        return get_ss_encrypted_data_len(pinfo, tvb, offset, NULL);
 }
 
 /**
@@ -549,13 +549,12 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, 
     return tvb_captured_length(tvb);
 }
 
-int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
+int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
     bool is_from_server;
     ss_cipher_ctx_t *cipher_ctx;
-    uint32_t offset;
     uint8_t *nonce_copy;
     uint8_t *encrypted_data;
     int err;
@@ -580,20 +579,21 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
     is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
 
     cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
-    offset = 0;
     if (!cipher_ctx->init)
-        /* Dissection of salt */
-        offset += dissect_ss_salt(tvb, pinfo, tree, data);
+    { /* Should not happen */
+        ws_critical("[%u] %s: Cipher context is not initialized", pinfo->num, __func__);
+        return -1;
+    }
 
     /*** Decryption ***/
     nonce_copy = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->nonce, cipher_ctx->cipher->nonce_len);
-    encrypted_data = (uint8_t *)tvb_memdup(wmem_file_scope(), tvb, offset, tvb_captured_length(tvb) - offset);
+    encrypted_data = (uint8_t *)tvb_memdup(wmem_file_scope(), tvb, 0, tvb_captured_length(tvb));
     err = ss_crypto->decrypt(cipher_ctx,
                              &plaintext,
                              encrypted_data,
                              cipher_ctx->nonce,
                              &plen,
-                             tvb_captured_length(tvb) - offset);
+                             tvb_captured_length(tvb));
     if (err == RET_CRYPTO_ERROR)
     {
         ws_critical("[%u] %s: Failed to decrypt", pinfo->num, __func__);
@@ -622,7 +622,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
     msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
     msg->plain_data = wmem_memdup(wmem_file_scope(), plaintext, *plen);
     msg->data_len = *plen;
-    msg->id = tvb_raw_offset(tvb) + offset;
+    msg->id = tvb_raw_offset(tvb);
     msg->type = (!is_from_server && !conv_data->relay_header_dissection_done) ? SS_RELAY_HEADER : SS_STREAM_DATA;
     msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
     msg->skey = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->skey, cipher_ctx->cipher->key_len);
@@ -640,7 +640,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
     add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks Data");
     if (msg->type == SS_RELAY_HEADER)
     {
-        dissector_ret = dissect_ss_relay_header(decrypted_tvb, pinfo, tree, data);
+        dissector_ret = dissect_ss_relay_header(decrypted_tvb, pinfo, tree, NULL);
         if (dissector_ret == -1)
         {
             ws_critical("[%u] %s: Failed to dissect relay header", pinfo->num, __func__);
@@ -650,12 +650,12 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
         conv_data->relay_header_dissection_done = true;
     }
     else if (msg->type == SS_STREAM_DATA)
-        dissector_ret = dissect_ss_stream_data(decrypted_tvb, pinfo, tree, data);
+        dissector_ret = dissect_ss_stream_data(decrypted_tvb, pinfo, tree, NULL);
 
     return tvb_captured_length(tvb);
 }
 
-int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
+int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
@@ -677,9 +677,9 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
 
     /*** Call Dissectors ***/
     if (!cipher_ctx->init)
-        return dissect_ss_salt(tvb, pinfo, tree, data);
+        return dissect_ss_salt(tvb, pinfo, tree, NULL);
     else
-        return dissect_ss_encrypted_data(tvb, pinfo, tree, data);
+        return dissect_ss_encrypted_data(tvb, pinfo, tree, NULL);
 }
 
 /**************************************************/
@@ -1451,18 +1451,10 @@ int validate_hostname(const char *hostname, const int hostname_len)
     return 1;
 }
 
-/**
- * @brief `wmem_map_find` compares the MEMORY ADDRESS of the frame data but not the VALUE.
- *  Therefore, `wmem_map_find_custom` is used instead.
- */
-int cmp_list_frame_uint_data(const void *a, const void *b)
-{
-    return *(uint32_t *)a - *(uint32_t *)b;
-}
-
 /**************************************************/
 /*                    Debugging                   */
 /**************************************************/
+/*
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data)
 {
     char *buf = (char *)user_data;
@@ -1515,7 +1507,7 @@ void debug_print_uint8_array(const uint8_t *array, uint32_t len, const char *var
     snprintf(tmp, sizeof(tmp), "[DEBUG] %s: ", var_name);
     strcat(buf, tmp);
 
-    for (int i = 0; i < len; i++)
+    for (uint32_t i = 0; i < len; i++)
     {
         snprintf(tmp, sizeof(tmp), "%02x", array[i]);
         strcat(buf, tmp);
@@ -1531,13 +1523,14 @@ void debug_print_tvb(tvbuff_t *tvb, const char *var_name)
     snprintf(tmp, sizeof(tmp), "[DEBUG] %s: ", var_name);
     strcat(buf, tmp);
 
-    for (int i = 0; i < tvb_captured_length(tvb); i++)
+    for (uint32_t i = 0; i < tvb_captured_length(tvb); i++)
     {
         snprintf(tmp, sizeof(tmp), "%02x", tvb_get_guint8(tvb, i));
         strcat(buf, tmp);
     }
     ws_message("%s", buf);
 }
+*/
 
 /*
  * Editor modelines  -  https://www.wireshark.org/tools/modelines.html

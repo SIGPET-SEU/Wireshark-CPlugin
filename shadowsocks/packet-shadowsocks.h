@@ -124,7 +124,7 @@ typedef struct ss_packet_info
 
 /********** Function Prototypes **********/
 /* Dissectors */
-unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data);
+unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data _U_);
 int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
@@ -147,8 +147,8 @@ void ss_aead_ctx_release(ss_cipher_ctx_t *cipher_ctx);
 uint16_t load16_be(const void *s);
 void sodium_increment(unsigned char *n, const uint32_t nlen);
 int validate_hostname(const char *hostname, const int hostname_len);
-int cmp_list_frame_uint_data(const void *a, const void *b) _U_;
 /* Debugging */
+/*
 typedef void (*PrintFunc)(const void *key, const void *value, void *user_data);
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data);
 void debug_print_uint_key_uint_value(const void *key, const void *value, void *user_data);
@@ -157,3 +157,4 @@ void debug_print_hash_map(wmem_map_t *hash_map, const char *var_name, PrintFunc 
 void debug_print_list(wmem_list_t *list, const char *var_name);
 void debug_print_uint8_array(const uint8_t *array, uint32_t len, const char *var_name);
 void debug_print_tvb(tvbuff_t *tvb, const char *var_name);
+*/

@@ -332,6 +332,7 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     encrypted_data = (uint8_t *)tvb_memdup(wmem_file_scope(), tvb, offset, CHUNK_SIZE_LEN + tlen);
     // NOTE: The `outsize` should always be expected length + tag length
     err = gcry_cipher_decrypt(cipher_ctx->cipher->hd, len_buf, CHUNK_SIZE_LEN + tlen, encrypted_data, CHUNK_SIZE_LEN + tlen);
+    wmem_free(wmem_file_scope(), encrypted_data);
     if (err)
     {
         ws_critical("[%u] %s: Failed to decode length: %s", pinfo->num, __func__, gcry_strerror(err));
@@ -339,14 +340,13 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     }
     /* Big-endian decoding */
     mlen = load16_be(len_buf);
+    wmem_free(wmem_file_scope(), len_buf);
     mlen = mlen & CHUNK_SIZE_MASK;
     if (mlen == 0)
     {
         ws_critical("[%u] %s: Invalid message length decoded: %u", pinfo->num, __func__, mlen);
         return 1;
     }
-
-    // TODO: free
 
     // NOTE: encrypted payload length(2) | length tag(tlen) | encrypted payload(plen) | payload tag(tlen)
     return (unsigned)(CHUNK_SIZE_LEN + tlen + mlen + tlen);
@@ -594,6 +594,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
                              cipher_ctx->nonce,
                              &plen,
                              tvb_captured_length(tvb));
+    wmem_free(wmem_file_scope(), encrypted_data);
     if (err == RET_CRYPTO_ERROR)
     {
         ws_critical("[%u] %s: Failed to decrypt", pinfo->num, __func__);
@@ -1019,6 +1020,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
     }
     /* Big-endian decoding */
     mlen = load16_be(len_buf);
+    wmem_free(wmem_file_scope(), len_buf);
     mlen = mlen & CHUNK_SIZE_MASK;
     if (mlen == 0)
     {
@@ -1062,8 +1064,6 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
 
     *plen = (uint32_t *)wmem_memdup(wmem_file_scope(), &mlen, sizeof(uint32_t));
     *p = (uint8_t *)wmem_memdup(wmem_file_scope(), tmp_p, mlen);
-
-    // TODO: free
     wmem_free(wmem_file_scope(), tmp_p);
 
     return RET_OK;

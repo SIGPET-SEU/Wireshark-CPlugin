@@ -730,7 +730,7 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
     conv_data = get_vmess_conv(conversation, proto_vmess);
 
     /* If the response has not been decrypted yet, one should perform decryption first. */
-    guint response_chunk_length = 38; /* TODO: use macro instead of magic constant */
+    guint response_chunk_length = VMESS_RESPONSE_HEADER_LENGTH;
     tvbuff_t* response_chunk_tvb = tvb_new_subset_length(tvb, offset, response_chunk_length);
 
     if (!conv_data->resp_decrypted) {
@@ -762,7 +762,7 @@ int dissect_vmess_response_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tr
 
 guint get_dissect_vmess_data_len(packet_info* pinfo _U_, tvbuff_t* tvb,
     int offset, void* data _U_) {
-    return tvb_get_ntohs(tvb, offset) + 2;
+    return tvb_get_ntohs(tvb, offset) + VMESS_DATA_HEADER_LENGTH;
 }
 
 gcry_error_t vmess_decoder_reset_iv(VMessDecoder* decoder, guchar* iv, size_t iv_len)

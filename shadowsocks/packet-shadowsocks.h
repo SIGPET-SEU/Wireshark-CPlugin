@@ -126,9 +126,8 @@ typedef struct ss_packet_info
 /********** Function Prototypes **********/
 /* Dissectors */
 unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data _U_);
-unsigned get_ss_dissected_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset _U_, void *data _U_);
 int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
-int dissect_ss_dissected_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_);
+int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);
 int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_);

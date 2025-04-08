@@ -246,7 +246,7 @@ unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void 
         msg = pkt ? pkt->messages : NULL;
         while (msg)
         {
-            if (msg->id == offset + tvb_raw_offset(tvb))
+            if (msg->offset == offset + tvb_raw_offset(tvb))
                 return msg->cipher_len;
             msg = msg->next;
         }
@@ -377,7 +377,7 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
         msg = pkt ? pkt->messages : NULL;
         while (msg)
         {
-            if (msg->id == tvb_raw_offset(tvb))
+            if (msg->offset == tvb_raw_offset(tvb))
                 break;
             msg = msg->next;
         }
@@ -395,7 +395,7 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
             proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, msg->skey, cipher_ctx->cipher->key_len));
             proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, msg->nonce, cipher_ctx->cipher->nonce_len));
             /* TVB */
-            decrypted_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->data_len, msg->data_len);
+            decrypted_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->plain_len, msg->plain_len);
             add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks Data");
         }
 
@@ -501,9 +501,9 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
 
     msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
     msg->plain_data = wmem_memdup(wmem_file_scope(), plaintext, *plen);
-    msg->data_len = *plen;
+    msg->plain_len = *plen;
     msg->cipher_len = tvb_captured_length(tvb);
-    msg->id = tvb_raw_offset(tvb);
+    msg->offset = tvb_raw_offset(tvb);
     msg->type = (!is_from_server && !conv_data->relay_header_dissection_done) ? SS_RELAY_HEADER : SS_STREAM_DATA;
     msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
     msg->skey = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->skey, cipher_ctx->cipher->key_len);
@@ -594,9 +594,9 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *d
 
         msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
         msg->plain_data = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
-        msg->data_len = cipher_ctx->cipher->key_len;
+        msg->plain_len = cipher_ctx->cipher->key_len;
         msg->cipher_len = cipher_ctx->cipher->key_len;
-        msg->id = tvb_raw_offset(tvb);
+        msg->offset = tvb_raw_offset(tvb);
         msg->type = SS_SALT;
         msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
         msg->skey = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->skey, cipher_ctx->cipher->key_len);

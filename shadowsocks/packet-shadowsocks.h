@@ -107,9 +107,9 @@ typedef struct ss_conv_data
 typedef struct ss_message_info
 {
     uint8_t *plain_data;
-    uint32_t data_len;
+    uint32_t plain_len;
     uint32_t cipher_len;
-    int id;
+    int offset;
     SsRecordType type;
     uint8_t *salt;
     uint8_t *skey;

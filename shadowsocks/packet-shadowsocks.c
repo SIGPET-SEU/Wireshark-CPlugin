@@ -51,11 +51,11 @@ static dissector_handle_t ss_handle;
 
 /********** Header Fields **********/
 /* Cipher Context */
-static int hf_cipher_ctx;
+static int hf_cipher_ctx_node;
 static int hf_cipher_ctx_salt;
 static int hf_cipher_ctx_skey;
 static int hf_cipher_ctx_nonce;
-static int hf_cipher_ctx_cipher;
+static int hf_cipher_ctx_cipher_node;
 static int hf_cipher_ctx_cipher_method;
 static int hf_cipher_ctx_cipher_password;
 static int hf_cipher_ctx_cipher_key;
@@ -63,14 +63,18 @@ static int hf_cipher_ctx_cipher_nonce_len;
 static int hf_cipher_ctx_cipher_key_len;
 static int hf_cipher_ctx_cipher_tag_len;
 /* Salt */
+static int hf_salt_node;
 static int hf_salt;
 /* Relay Header */
+static int hf_relay_header_node;
 static int hf_atyp;
 static int hf_dst_addr_ipv4;
 static int hf_dst_addr_domainname_len;
 static int hf_dst_addr_domainname;
 static int hf_dst_addr_ipv6;
 static int hf_dst_port;
+/* Stream Data */
+static int hf_stream_data_node;
 /* Reassembly Info */
 static int hf_msg_fragments;
 static int hf_msg_fragment;
@@ -181,8 +185,6 @@ ss_crypto_t *ss_crypto;
 /**************************************************/
 int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
-    proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
-    proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
     bool is_from_server;
@@ -203,27 +205,11 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
     cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
 
-    /*** Column Info & Protocol Tree ***/
+    /*** Column Info ***/
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "Shadowsocks");
     col_clear(pinfo->cinfo, COL_INFO);
-    ti = proto_tree_add_item(tree, proto_ss, tvb, 0, -1, ENC_NA);
-    ss_tree = proto_item_add_subtree(ti, ett_ss);
-    /* Cipher context */
-    cipher_ctx_ti = proto_tree_add_item(ss_tree, hf_cipher_ctx, tvb, 0, 0, ENC_NA);
-    proto_item_set_text(cipher_ctx_ti, "Cipher Context");
-    cipher_ctx_tree = proto_item_add_subtree(cipher_ctx_ti, ett_cipher_ctx);
-    /* Cipher */
-    cipher_ctx_cipher_ti = proto_tree_add_item(cipher_ctx_tree, hf_cipher_ctx_cipher, tvb, 0, 0, ENC_NA);
-    proto_item_set_text(cipher_ctx_cipher_ti, "Cipher");
-    cipher_ctx_cipher_tree = proto_item_add_subtree(cipher_ctx_cipher_ti, ett_cipher_ctx_cipher);
-    proto_tree_add_int(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_method, tvb, 0, 0, cipher_ctx->cipher->method);
-    proto_tree_add_string(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_password, tvb, 0, 0, pref_password);
-    proto_tree_add_bytes_with_length(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key, tvb, 0, 0, cipher_ctx->cipher->key, cipher_ctx->cipher->key_len);
-    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_nonce_len, tvb, 0, 0, cipher_ctx->cipher->nonce_len);
-    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key_len, tvb, 0, 0, cipher_ctx->cipher->key_len);
-    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_tag_len, tvb, 0, 0, cipher_ctx->cipher->tag_len);
 
-    tcp_dissect_pdus(tvb, pinfo, ss_tree, true,
+    tcp_dissect_pdus(tvb, pinfo, tree, true,
                      !cipher_ctx->init
                          ? cipher_ctx->cipher->key_len
                          : CHUNK_SIZE_LEN + cipher_ctx->cipher->tag_len,
@@ -333,8 +319,17 @@ unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void 
     return (unsigned)(CHUNK_SIZE_LEN + tlen + mlen + tlen);
 }
 
+/**
+ * @brief Dissect the Shadowsocks message. There are several branches:
+ *  1. The message is already dissected. Just call the corresponding dissector according to the message type.
+ *  2. If the message is not dissected yet. Determine the message type and dissect it.
+ *    - If the message is a salt, derive the subkey frome it and initialize the cipher context.
+ *    - Otherwise, decrypt the payload and dissect it.
+ */
 int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
+    proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
+    proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
     ss_packet_info_t *pkt;
     ss_message_info_t *msg;
     tvbuff_t *decrypted_tvb;
@@ -342,6 +337,37 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
     ss_conv_data_t *conv_data;
     bool is_from_server;
     ss_cipher_ctx_t *cipher_ctx;
+
+    /*** Conversation ***/
+    conversation = find_or_create_conversation(pinfo);
+    conv_data = (ss_conv_data_t *)get_ss_conv_data(conversation, proto_ss);
+
+    /*** Direction ***/
+    if (conv_data->server_addr->data == NULL)
+    { /* Should not happen */
+        ws_critical("[%u] %s: Server address is NULL", pinfo->num, __func__);
+        return -1;
+    }
+    is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
+    cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
+
+    /*** Protocol Tree ***/
+    ti = proto_tree_add_item(tree, proto_ss, tvb, 0, -1, ENC_NA);
+    ss_tree = proto_item_add_subtree(ti, ett_ss);
+    /* Cipher context */
+    cipher_ctx_ti = proto_tree_add_item(ss_tree, hf_cipher_ctx_node, tvb, 0, 0, ENC_NA);
+    proto_item_set_text(cipher_ctx_ti, "Cipher Context");
+    cipher_ctx_tree = proto_item_add_subtree(cipher_ctx_ti, ett_cipher_ctx);
+    /* Cipher */
+    cipher_ctx_cipher_ti = proto_tree_add_item(cipher_ctx_tree, hf_cipher_ctx_cipher_node, tvb, 0, 0, ENC_NA);
+    proto_item_set_text(cipher_ctx_cipher_ti, "Cipher");
+    cipher_ctx_cipher_tree = proto_item_add_subtree(cipher_ctx_cipher_ti, ett_cipher_ctx_cipher);
+    proto_item_set_generated(proto_tree_add_int(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_method, tvb, 0, 0, cipher_ctx->cipher->method));
+    proto_item_set_generated(proto_tree_add_string(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_password, tvb, 0, 0, pref_password));
+    proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key, tvb, 0, 0, cipher_ctx->cipher->key, cipher_ctx->cipher->key_len));
+    proto_item_set_generated(proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_nonce_len, tvb, 0, 0, cipher_ctx->cipher->nonce_len));
+    proto_item_set_generated(proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key_len, tvb, 0, 0, cipher_ctx->cipher->key_len));
+    proto_item_set_generated(proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_tag_len, tvb, 0, 0, cipher_ctx->cipher->tag_len));
 
     /*** Already Dissected Packets ***/
     if (PINFO_FD_VISITED(pinfo))
@@ -364,6 +390,11 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
 
         if (msg->type == SS_RELAY_HEADER || msg->type == SS_STREAM_DATA)
         {
+            /* Protocol tree */
+            proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_salt, tvb, 0, 0, msg->salt, cipher_ctx->cipher->key_len));
+            proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, msg->skey, cipher_ctx->cipher->key_len));
+            proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, msg->nonce, cipher_ctx->cipher->nonce_len));
+            /* TVB */
             decrypted_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->data_len, msg->data_len);
             add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks Data");
         }
@@ -374,13 +405,13 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
             col_append_str(pinfo->cinfo, COL_INFO, "[Unknown]");
             break;
         case SS_SALT:
-            dissect_ss_salt(tvb, pinfo, tree, NULL);
+            dissect_ss_salt(tvb, pinfo, ss_tree, NULL);
             break;
         case SS_RELAY_HEADER:
-            dissect_ss_relay_header(decrypted_tvb, pinfo, tree, NULL);
+            dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, NULL);
             break;
         case SS_STREAM_DATA:
-            dissect_ss_stream_data(decrypted_tvb, pinfo, tree, NULL);
+            dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, NULL);
             break;
         default:
             ws_critical("[%u] %s: Unknown message type: %d", pinfo->num, __func__, msg->type);
@@ -390,24 +421,11 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
         return tvb_captured_length(tvb);
     }
 
-    /*** Conversation ***/
-    conversation = find_or_create_conversation(pinfo);
-    conv_data = (ss_conv_data_t *)get_ss_conv_data(conversation, proto_ss);
-
-    /*** Direction ***/
-    if (conv_data->server_addr->data == NULL)
-    { /* Should not happen */
-        ws_critical("[%u] %s: Server address is NULL", pinfo->num, __func__);
-        return -1;
-    }
-    is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
-    cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
-
     /*** Call Dissectors ***/
     if (!cipher_ctx->init)
-        return dissect_ss_salt(tvb, pinfo, tree, NULL);
+        return dissect_ss_salt(tvb, pinfo, ss_tree, NULL);
     else
-        return dissect_ss_encrypted_data(tvb, pinfo, tree, NULL);
+        return dissect_ss_encrypted_data(tvb, pinfo, ss_tree, NULL);
 }
 
 int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
@@ -537,6 +555,8 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *d
     ss_packet_info_t *pkt;
     ss_message_info_t *msg;
     ss_message_info_t **pmsgs;
+    proto_item *salt_ti;
+    proto_tree *salt_tree;
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -591,7 +611,9 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *d
 
     /*** Column Info & Protocol Tree ***/
     col_append_str(pinfo->cinfo, COL_INFO, "[Salt]");
-    proto_tree_add_item(tree, hf_salt, tvb, 0, cipher_ctx->cipher->key_len, ENC_NA);
+    salt_ti = proto_tree_add_item(tree, hf_salt_node, tvb, 0, -1, ENC_NA);
+    salt_tree = proto_item_add_subtree(salt_ti, ett_ss);
+    proto_tree_add_item(salt_tree, hf_salt, tvb, 0, cipher_ctx->cipher->key_len, ENC_NA);
 
     return cipher_ctx->cipher->key_len;
 }
@@ -616,6 +638,8 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *d
  */
 int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
+    proto_item *relay_header_ti;
+    proto_tree *relay_header_tree;
     int offset = 0;
     uint8_t atyp;
     int host_len;
@@ -624,8 +648,10 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     col_append_str(pinfo->cinfo, COL_INFO, "[Relay Header]");
 
     /*** Protocol Tree ***/
+    relay_header_ti = proto_tree_add_item(tree, hf_relay_header_node, tvb, 0, -1, ENC_NA);
+    relay_header_tree = proto_item_add_subtree(relay_header_ti, ett_ss);
     atyp = tvb_get_guint8(tvb, offset);
-    proto_tree_add_item(tree, hf_atyp, tvb, offset++, 1, ENC_BIG_ENDIAN);
+    proto_tree_add_item(relay_header_tree, hf_atyp, tvb, offset++, 1, ENC_BIG_ENDIAN);
     switch (atyp & ADDRTYPE_MASK)
     {
     case RELAY_HEADER_ATYP_IPV4:
@@ -633,13 +659,13 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         // NOTE: Variable declaration must be in the block
         ws_in4_addr in4_addr = tvb_get_ipv4(tvb, offset);
         host_len = sizeof(struct in_addr);
-        proto_tree_add_ipv4(tree, hf_dst_addr_ipv4, tvb, offset, host_len, in4_addr);
+        proto_tree_add_ipv4(relay_header_tree, hf_dst_addr_ipv4, tvb, offset, host_len, in4_addr);
         break;
     }
     case RELAY_HEADER_ATYP_DOMAINNAME:
         host_len = (int)tvb_get_guint8(tvb, offset);
-        proto_tree_add_item(tree, hf_dst_addr_domainname_len, tvb, offset++, 1, ENC_BIG_ENDIAN);
-        proto_tree_add_item(tree, hf_dst_addr_domainname, tvb, offset, host_len, ENC_ASCII);
+        proto_tree_add_item(relay_header_tree, hf_dst_addr_domainname_len, tvb, offset++, 1, ENC_BIG_ENDIAN);
+        proto_tree_add_item(relay_header_tree, hf_dst_addr_domainname, tvb, offset, host_len, ENC_ASCII);
         break;
     case RELAY_HEADER_ATYP_IPV6:
     {
@@ -647,7 +673,7 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         ws_in6_addr *in6_addr = wmem_new0(wmem_file_scope(), ws_in6_addr);
         tvb_get_ipv6(tvb, offset, in6_addr);
         host_len = sizeof(struct in6_addr);
-        proto_tree_add_ipv6(tree, hf_dst_addr_ipv6, tvb, offset, host_len, in6_addr);
+        proto_tree_add_ipv6(relay_header_tree, hf_dst_addr_ipv6, tvb, offset, host_len, in6_addr);
         break;
     }
     default:
@@ -656,13 +682,15 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         return -1;
     }
     offset += host_len;
-    proto_tree_add_item(tree, hf_dst_port, tvb, offset, 2, ENC_BIG_ENDIAN);
+    proto_tree_add_item(relay_header_tree, hf_dst_port, tvb, offset, 2, ENC_BIG_ENDIAN);
 
     return tvb_captured_length(tvb);
 }
 
 int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
+    proto_item *stream_data_ti;
+    proto_tree *stream_data_tree;
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
     dissector_handle_t tls_handle;
@@ -670,6 +698,8 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, 
 
     /*** Column Info & Protocol Tree ***/
     col_append_str(pinfo->cinfo, COL_INFO, "[Stream Data]");
+    stream_data_ti = proto_tree_add_item(tree, hf_stream_data_node, tvb, 0, -1, ENC_NA);
+    stream_data_tree = proto_item_add_subtree(stream_data_ti, ett_ss);
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -679,12 +709,12 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, 
     tls_handle = find_dissector("tls");
     reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
                                                     tvb_captured_length_remaining(tvb, 0),
-                                                    tree, proto_tree_get_parent_tree(tree),
+                                                    stream_data_tree, proto_tree_get_parent_tree(stream_data_tree),
                                                     proto_ss_streaming_reassembly_table,
                                                     conv_data->reassembly_info,
                                                     get_virtual_frame_num64(tvb, pinfo, 0),
                                                     tls_handle,
-                                                    proto_tree_get_parent_tree(tree),
+                                                    proto_tree_get_parent_tree(stream_data_tree),
                                                     NULL,
                                                     "Shadowsocks",
                                                     &msg_frag_items, hf_msg_body_segment);
@@ -711,9 +741,9 @@ void proto_register_ss(void)
     /*** Header Fields ***/
     static hf_register_info hf[] = {
         /* Cipher Context */
-        {&hf_cipher_ctx,
+        {&hf_cipher_ctx_node,
          {"Cipher Context",
-          "shadowsocks.cipher_ctx",
+          "shadowsocks.cipher_ctx_node",
           FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_salt,
@@ -731,9 +761,9 @@ void proto_register_ss(void)
           "shadowsocks.cipher_ctx.nonce",
           FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
-        {&hf_cipher_ctx_cipher,
+        {&hf_cipher_ctx_cipher_node,
          {"Cipher",
-          "shadowsocks.cipher_ctx.cipher",
+          "shadowsocks.cipher_ctx.cipher_node",
           FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher_method,
@@ -767,12 +797,22 @@ void proto_register_ss(void)
           FT_UINT8, BASE_DEC,
           NULL, 0x0, NULL, HFILL}},
         /* Salt */
+        {&hf_salt_node,
+         {"Shadowsocks - Salt",
+          "shadowsocks.salt_node",
+          FT_NONE, BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
         {&hf_salt,
          {"Salt",
           "shadowsocks.salt",
           FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         /* Relay Header */
+        {&hf_relay_header_node,
+         {"Shadowsocks - Relay Header",
+          "shadowsocks.relay_header_node",
+          FT_NONE, BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
         {&hf_atyp,
          {"Address Type",
           "shadowsocks.atyp",
@@ -802,6 +842,12 @@ void proto_register_ss(void)
          {"Destination Port",
           "shadowsocks.dst_port",
           FT_UINT16, BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
+        /* Stream Data */
+        {&hf_stream_data_node,
+         {"Shadowsocks - Stream Data",
+          "shadowsocks.stream_data_node",
+          FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         /* Reassembly Info */
         {&hf_msg_fragments,

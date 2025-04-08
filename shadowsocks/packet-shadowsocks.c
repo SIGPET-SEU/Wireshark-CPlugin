@@ -187,9 +187,6 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     ss_conv_data_t *conv_data;
     bool is_from_server;
     ss_cipher_ctx_t *cipher_ctx;
-    ss_packet_info_t *pkt;
-    ss_message_info_t *msg;
-    tvbuff_t *next_tvb;
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -226,46 +223,18 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key_len, tvb, 0, 0, cipher_ctx->cipher->key_len);
     proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_tag_len, tvb, 0, 0, cipher_ctx->cipher->tag_len);
 
-    /*** Dissection of New Packets ***/
     if (!PINFO_FD_VISITED(pinfo))
-    {
+        /*** Dissection of New Packets ***/
         tcp_dissect_pdus(tvb, pinfo, ss_tree, true,
                          !cipher_ctx->init
                              ? cipher_ctx->cipher->key_len
                              : CHUNK_SIZE_LEN + cipher_ctx->cipher->tag_len,
                          get_ss_message_len, dissect_ss_message, NULL);
-        return tvb_captured_length(tvb);
-    }
+    else
+        /*** Dissection of Dissected Packets ***/
+        tcp_dissect_pdus(tvb, pinfo, ss_tree, true, 1,
+                         get_ss_dissected_message_len, dissect_ss_dissected_message, NULL);
 
-    /*** Dissection of Dissected Packets ***/
-    pkt = (ss_packet_info_t *)p_get_proto_data(wmem_file_scope(), pinfo, proto_ss, 0);
-    msg = pkt ? pkt->messages : NULL;
-    /* Traverse all Shadowsocks messages in current packet */
-    while (msg)
-    {
-        /* Protocol tree - cipher context */
-        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_salt, tvb, 0, 0, msg->salt, cipher_ctx->cipher->key_len);
-        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, msg->skey, cipher_ctx->cipher->key_len);
-        if (msg->nonce != NULL)
-            proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, msg->nonce, cipher_ctx->cipher->nonce_len);
-        if (msg->type == SS_SALT)
-        {
-            next_tvb = tvb_new_subset_length_caplen(tvb, msg->id - tvb_raw_offset(tvb), msg->data_len, msg->data_len);
-            dissect_ss_salt(next_tvb, pinfo, ss_tree, NULL);
-        }
-        else
-        {
-            next_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->data_len, msg->data_len);
-            add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Data");
-            if (msg->type == SS_RELAY_HEADER)
-                dissect_ss_relay_header(next_tvb, pinfo, ss_tree, NULL);
-            else if (msg->type == SS_STREAM_DATA)
-                dissect_ss_stream_data(next_tvb, pinfo, tree, NULL); // FIXME: Should the 3rd parameter be `tree` or `ss_tree`?
-            else
-                col_append_str(pinfo->cinfo, COL_INFO, "[Unknown]");
-        }
-        msg = msg->next;
-    }
     return tvb_captured_length(tvb);
 }
 
@@ -309,7 +278,7 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     if (tvb_captured_length_remaining(tvb, offset) < (int)(CHUNK_SIZE_LEN + tlen))
     { /* Should not happen */
 #if SS_DEBUG
-        ws_critical("[%u] %s: %u < CHUNK_SIZE_LEN(%d) + tlen(%lu)", pinfo->num, __func__, tvb_captured_length_remaining(tvb, offset), CHUNK_SIZE_LEN, tlen);
+        ws_critical("[%u] %s: %u < CHUNK_SIZE_LEN(%d) + tlen(%u)", pinfo->num, __func__, tvb_captured_length_remaining(tvb, offset), CHUNK_SIZE_LEN, tlen);
 #endif
         return 0;
     }
@@ -379,6 +348,28 @@ unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void 
         return get_ss_encrypted_data_len(pinfo, tvb, offset, NULL);
 }
 
+unsigned get_ss_dissected_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data _U_)
+{
+    ss_packet_info_t *pkt;
+    ss_message_info_t *msg;
+
+    /*** Lookup Message Info ***/
+    pkt = (ss_packet_info_t *)p_get_proto_data(wmem_file_scope(), pinfo, proto_ss, 0);
+    msg = pkt ? pkt->messages : NULL;
+    while (msg)
+    {
+        if (msg->id == offset + tvb_raw_offset(tvb))
+            return msg->cipher_len;
+        msg = msg->next;
+    }
+
+    /* Two cases:
+     * 1. The message info is not stored properly when decrypting. (Should not happen)
+     * 2. The message is incomplete and the dissection will be done later. (It's OK)
+     */
+    return 0;
+}
+
 /**
  * @brief An AEAD encrypted TCP stream starts with a randomly generated salt to derive the per-session subkey (client -> server).
  *  Structure:
@@ -436,6 +427,7 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *d
         msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
         msg->plain_data = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
         msg->data_len = cipher_ctx->cipher->key_len;
+        msg->cipher_len = cipher_ctx->cipher->key_len;
         msg->id = tvb_raw_offset(tvb);
         msg->type = SS_SALT;
         msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
@@ -455,6 +447,7 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *d
 
     return cipher_ctx->cipher->key_len;
 }
+
 /**
  * @brief A relay header is typically sent after the salt by the client to the server.
  *  It contains the destination address and port that the client wants to connect to.
@@ -524,7 +517,11 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, 
 {
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
-    dissector_handle_t http_handle, tls_handle;
+    dissector_handle_t tls_handle;
+    // dissector_handle_t http_handle;
+
+    /*** Column Info & Protocol Tree ***/
+    col_append_str(pinfo->cinfo, COL_INFO, "[Stream Data]");
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -543,13 +540,13 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, 
                                                     NULL,
                                                     "Shadowsocks",
                                                     &msg_frag_items, hf_msg_body_segment);
-    http_handle = find_dissector("http");
-    call_dissector(http_handle, tvb, pinfo, tree);
+    // http_handle = find_dissector("http");
+    // call_dissector(http_handle, tvb, pinfo, tree);
 
     return tvb_captured_length(tvb);
 }
 
-int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void *data _U_)
 {
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
@@ -623,6 +620,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
     msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
     msg->plain_data = wmem_memdup(wmem_file_scope(), plaintext, *plen);
     msg->data_len = *plen;
+    msg->cipher_len = tvb_captured_length(tvb);
     msg->id = tvb_raw_offset(tvb);
     msg->type = (!is_from_server && !conv_data->relay_header_dissection_done) ? SS_RELAY_HEADER : SS_STREAM_DATA;
     msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
@@ -681,6 +679,57 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
         return dissect_ss_salt(tvb, pinfo, tree, NULL);
     else
         return dissect_ss_encrypted_data(tvb, pinfo, tree, NULL);
+}
+
+int dissect_ss_dissected_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+{
+    ss_packet_info_t *pkt;
+    ss_message_info_t *msg;
+    tvbuff_t *plain_tvb;
+
+    /*** Lookup Message Info ***/
+    pkt = (ss_packet_info_t *)p_get_proto_data(wmem_file_scope(), pinfo, proto_ss, 0);
+    msg = pkt ? pkt->messages : NULL;
+    while (msg)
+    {
+        if (msg->id == tvb_raw_offset(tvb))
+            break;
+        msg = msg->next;
+    }
+
+    if (!msg)
+    { /* Should not happen */
+        ws_critical("[%u] %s: Failed to find message info at offset %d", pinfo->num, __func__, tvb_raw_offset(tvb));
+        return -1;
+    }
+
+    if (msg->type == SS_RELAY_HEADER ||
+        msg->type == SS_STREAM_DATA)
+    {
+        plain_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->data_len, msg->data_len);
+        add_new_data_source(pinfo, plain_tvb, "Decrypted Shadowsocks Data");
+    }
+
+    switch (msg->type)
+    {
+    case SS_UNKNOWN:
+        col_append_str(pinfo->cinfo, COL_INFO, "[Unknown]");
+        break;
+    case SS_SALT:
+        dissect_ss_salt(tvb, pinfo, tree, NULL);
+        break;
+    case SS_RELAY_HEADER:
+        dissect_ss_relay_header(plain_tvb, pinfo, tree, NULL);
+        break;
+    case SS_STREAM_DATA:
+        dissect_ss_stream_data(plain_tvb, pinfo, tree, NULL);
+        break;
+    default:
+        ws_critical("[%u] %s: Unknown message type: %d", pinfo->num, __func__, msg->type);
+        break;
+    }
+
+    return tvb_captured_length(tvb);
 }
 
 /**************************************************/
@@ -991,7 +1040,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
     if (clen <= 2 * tlen + CHUNK_SIZE_LEN)
     {
 #if SS_DEBUG
-        ws_message("%s: %lu <= 2 * tlen(%lu) + CHUNK_SIZE_LEN(%d)", __func__, clen, tlen, CHUNK_SIZE_LEN);
+        ws_message("%s: %u <= 2 * tlen(%u) + CHUNK_SIZE_LEN(%d)", __func__, clen, tlen, CHUNK_SIZE_LEN);
 #endif
         return RET_CRYPTO_NEED_MORE;
     }
@@ -1032,7 +1081,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
     if (clen < chunk_len)
     {
 #if SS_DEBUG
-        ws_message("%s: %lu < 2 * tlen(%lu) + CHUNK_SIZE_LEN(%d) + mlen(%lu)", __func__, clen, tlen, CHUNK_SIZE_LEN, mlen);
+        ws_message("%s: %u < 2 * tlen(%u) + CHUNK_SIZE_LEN(%d) + mlen(%u)", __func__, clen, tlen, CHUNK_SIZE_LEN, mlen);
 #endif
         return RET_CRYPTO_NEED_MORE;
     }
@@ -1454,7 +1503,6 @@ int validate_hostname(const char *hostname, const int hostname_len)
 /**************************************************/
 /*                    Debugging                   */
 /**************************************************/
-/*
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data)
 {
     char *buf = (char *)user_data;
@@ -1530,7 +1578,6 @@ void debug_print_tvb(tvbuff_t *tvb, const char *var_name)
     }
     ws_message("%s", buf);
 }
-*/
 
 /*
  * Editor modelines  -  https://www.wireshark.org/tools/modelines.html

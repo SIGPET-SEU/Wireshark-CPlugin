@@ -122,46 +122,15 @@ static int hf_vmess_request_addr_type;       /* Address type */
 static int hf_vmess_request_addr;       /* Address */
 
 // heads for displaying reassembly information
-static int hf_msg_fragments;
-static int hf_msg_fragment;
-static int hf_msg_fragment_overlap;
-static int hf_msg_fragment_overlap_conflicts;
-static int hf_msg_fragment_multiple_tails;
-static int hf_msg_fragment_too_long_fragment;
-static int hf_msg_fragment_error;
-static int hf_msg_fragment_count;
-static int hf_msg_reassembled_in;
-static int hf_msg_reassembled_length;
-static int hf_msg_reassembled_data;
-static int hf_msg_body_segment;
+REASSEMBLE_ITEMS_DEFINE(msg, "VMess Message");
 /**************VMess Fields End****************/
 
 /**************VMess ETT Fileds****************/
 
 static int ett_vmess;
 
-static gint ett_msg_fragment;
-static gint ett_msg_fragments;
 static gint ett_vmess_opt;
 
-/************VMess ETT Fileds End**************/
-
-static const fragment_items msg_frag_items = {
-    &ett_msg_fragment,
-    &ett_msg_fragments,
-    &hf_msg_fragments,
-    &hf_msg_fragment,
-    &hf_msg_fragment_overlap,
-    &hf_msg_fragment_overlap_conflicts,
-    &hf_msg_fragment_multiple_tails,
-    &hf_msg_fragment_too_long_fragment,
-    &hf_msg_fragment_error,
-    &hf_msg_fragment_count,
-    &hf_msg_reassembled_in,
-    &hf_msg_reassembled_length,
-    &hf_msg_reassembled_data,
-    "VMess Message fragments",
-};
 
 static GString* kdfSaltConstAuthIDEncryptionKey;
 static GString* kdfSaltConstAEADRespHeaderLenKey;
@@ -447,7 +416,7 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
     reassemble_streaming_data_and_call_subdissector(packet_tvb, pinfo, 0, tvb_reported_length_remaining(packet_tvb, 0),
         vmess_tree, proto_tree_get_parent_tree(vmess_tree), proto_vmess_streaming_reassembly_table,
         conv_data->reassembly_info, get_virtual_frame_num64(packet_tvb, pinfo, 0), tls_handle,
-        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_frag_items, hf_msg_body_segment);
+        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_fragment_items, hf_msg_segment);
 
     pinfo->ptype = save_port_type;
     pinfo->can_desegment = save_can_desegment;
@@ -1700,40 +1669,44 @@ proto_register_vmess(void)
             NULL, 0x0,
             NULL, HFILL }
         },
+        // VMess Fragment
         { &hf_msg_fragments,
-            {"Reassembled VMess Message fragments", "vmess.msg.fragments",
+            {"Reassembled VMess Segments", "vmess.fragments",
             FT_NONE, BASE_NONE, NULL, 0x00, NULL, HFILL }
         },
         { &hf_msg_fragment,
-            {"Message fragment", "vmess.msg.fragment",
+            {"Message fragment", "vmess.fragment",
             FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_fragment_overlap,
-            {"Message fragment overlap", "vmess.msg.fragment.overlap",
+            {"Message fragment overlap", "vmess.fragment.overlap",
             FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_fragment_overlap_conflicts,
             {"Message fragment overlapping with conflicting data",
-            "vmess.msg.fragment.overlap.conflicts",
+            "vmess.fragment.overlap.conflicts",
             FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_fragment_multiple_tails,
             {"Message has multiple tail fragments",
-            "vmess.msg.fragment.multiple_tails",
+            "vmess.fragment.multiple_tails",
             FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_fragment_too_long_fragment,
-            {"Message fragment too long", "vmess.msg.fragment.too_long_fragment",
+            {"Message fragment too long", "vmess.fragment.too_long_fragment",
             FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_fragment_error,
-            {"Message defragmentation error", "vmess.msg.fragment.error",
+            {"Message defragmentation error", "vmess.fragment.error",
             FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_fragment_count,
-            {"Message fragment count", "vmess.msg.fragment.count",
+            {"Message fragment count", "vmess.fragment.count",
             FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_reassembled_in,
             {"Reassembled in", "vmess.reassembled_in",
             FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_reassembled_length,
-            {"Reassembled length", "vmess.msg.reassembled.length",
+            {"Reassembled length", "vmess.reassembled.length",
             FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
-        { &hf_msg_body_segment,
+        { &hf_msg_reassembled_data,
+            {"Reassembled data",  "vmess.reassembled.data",
+            FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL} },
+        { &hf_msg_segment,
             {"VMess segment", "vmess.segment_data",
             FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL } },
     };

@@ -51,11 +51,11 @@ static dissector_handle_t ss_handle;
 
 /********** Header Fields **********/
 /* Cipher Context */
-static int hf_cipher_ctx;
+static int hf_cipher_ctx_node;
 static int hf_cipher_ctx_salt;
 static int hf_cipher_ctx_skey;
 static int hf_cipher_ctx_nonce;
-static int hf_cipher_ctx_cipher;
+static int hf_cipher_ctx_cipher_node;
 static int hf_cipher_ctx_cipher_method;
 static int hf_cipher_ctx_cipher_password;
 static int hf_cipher_ctx_cipher_key;
@@ -63,14 +63,18 @@ static int hf_cipher_ctx_cipher_nonce_len;
 static int hf_cipher_ctx_cipher_key_len;
 static int hf_cipher_ctx_cipher_tag_len;
 /* Salt */
+static int hf_salt_node;
 static int hf_salt;
 /* Relay Header */
+static int hf_relay_header_node;
 static int hf_atyp;
 static int hf_dst_addr_ipv4;
 static int hf_dst_addr_domainname_len;
 static int hf_dst_addr_domainname;
 static int hf_dst_addr_ipv6;
 static int hf_dst_port;
+/* Stream Data */
+static int hf_stream_data_node;
 /* Reassembly Info */
 static int hf_msg_fragments;
 static int hf_msg_fragment;
@@ -181,15 +185,10 @@ ss_crypto_t *ss_crypto;
 /**************************************************/
 int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
-    proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
-    proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
     bool is_from_server;
     ss_cipher_ctx_t *cipher_ctx;
-    ss_packet_info_t *pkt;
-    ss_message_info_t *msg;
-    tvbuff_t *next_tvb;
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -206,84 +205,57 @@ int dissect_ss(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
     cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
 
-    /*** Column Info & Protocol Tree ***/
+    /*** Column Info ***/
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "Shadowsocks");
     col_clear(pinfo->cinfo, COL_INFO);
-    ti = proto_tree_add_item(tree, proto_ss, tvb, 0, -1, ENC_NA);
-    ss_tree = proto_item_add_subtree(ti, ett_ss);
-    /* Cipher context */
-    cipher_ctx_ti = proto_tree_add_item(ss_tree, hf_cipher_ctx, tvb, 0, 0, ENC_NA);
-    proto_item_set_text(cipher_ctx_ti, "Cipher Context");
-    cipher_ctx_tree = proto_item_add_subtree(cipher_ctx_ti, ett_cipher_ctx);
-    /* Cipher */
-    cipher_ctx_cipher_ti = proto_tree_add_item(cipher_ctx_tree, hf_cipher_ctx_cipher, tvb, 0, 0, ENC_NA);
-    proto_item_set_text(cipher_ctx_cipher_ti, "Cipher");
-    cipher_ctx_cipher_tree = proto_item_add_subtree(cipher_ctx_cipher_ti, ett_cipher_ctx_cipher);
-    proto_tree_add_int(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_method, tvb, 0, 0, cipher_ctx->cipher->method);
-    proto_tree_add_string(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_password, tvb, 0, 0, pref_password);
-    proto_tree_add_bytes_with_length(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key, tvb, 0, 0, cipher_ctx->cipher->key, cipher_ctx->cipher->key_len);
-    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_nonce_len, tvb, 0, 0, cipher_ctx->cipher->nonce_len);
-    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key_len, tvb, 0, 0, cipher_ctx->cipher->key_len);
-    proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_tag_len, tvb, 0, 0, cipher_ctx->cipher->tag_len);
 
-    /*** Dissection of New Packets ***/
-    if (!PINFO_FD_VISITED(pinfo))
-    {
-        tcp_dissect_pdus(tvb, pinfo, ss_tree, true,
-                         !cipher_ctx->init
-                             ? cipher_ctx->cipher->key_len
-                             : CHUNK_SIZE_LEN + cipher_ctx->cipher->tag_len,
-                         get_ss_message_len, dissect_ss_message, NULL);
-        return tvb_captured_length(tvb);
-    }
+    tcp_dissect_pdus(tvb, pinfo, tree, true,
+                     !cipher_ctx->init
+                         ? cipher_ctx->cipher->key_len
+                         : CHUNK_SIZE_LEN + cipher_ctx->cipher->tag_len,
+                     get_ss_message_len, dissect_ss_message, NULL);
 
-    /*** Dissection of Dissected Packets ***/
-    pkt = (ss_packet_info_t *)p_get_proto_data(wmem_file_scope(), pinfo, proto_ss, 0);
-    msg = pkt ? pkt->messages : NULL;
-    /* Traverse all Shadowsocks messages in current packet */
-    while (msg)
-    {
-        /* Protocol tree - cipher context */
-        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_salt, tvb, 0, 0, msg->salt, cipher_ctx->cipher->key_len);
-        proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, msg->skey, cipher_ctx->cipher->key_len);
-        if (msg->nonce != NULL)
-            proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, msg->nonce, cipher_ctx->cipher->nonce_len);
-        if (msg->type == SS_SALT)
-        {
-            next_tvb = tvb_new_subset_length_caplen(tvb, msg->id - tvb_raw_offset(tvb), msg->data_len, msg->data_len);
-            dissect_ss_salt(next_tvb, pinfo, ss_tree, NULL);
-        }
-        else
-        {
-            next_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->data_len, msg->data_len);
-            add_new_data_source(pinfo, next_tvb, "Decrypted Shadowsocks Data");
-            if (msg->type == SS_RELAY_HEADER)
-                dissect_ss_relay_header(next_tvb, pinfo, ss_tree, NULL);
-            else if (msg->type == SS_STREAM_DATA)
-                dissect_ss_stream_data(next_tvb, pinfo, tree, NULL); // FIXME: Should the 3rd parameter be `tree` or `ss_tree`?
-            else
-                col_append_str(pinfo->cinfo, COL_INFO, "[Unknown]");
-        }
-        msg = msg->next;
-    }
     return tvb_captured_length(tvb);
 }
 
-unsigned get_ss_salt_len(packet_info *pinfo _U_, tvbuff_t *tvb _U_, int offset _U_, void *data _U_)
+/**
+ * @brief Get the length of a Shadowsocks message. There are several branches:
+ *  1. The message is already dissected. Just return the length stored in the message info.
+ *  2. The message is not dissected yet.
+ *    - If it is a salt, return the length of the salt.
+ *    - Otherwise, decrypt the payload length with fixed length.
+ */
+unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data _U_)
 {
-    return ss_crypto->cipher->key_len;
-}
-
-unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data _U_)
-{
+    ss_packet_info_t *pkt;
+    ss_message_info_t *msg;
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
     bool is_from_server;
     ss_cipher_ctx_t *cipher_ctx;
+    uint32_t nlen, tlen, mlen;
     gcry_error_t err;
-    uint32_t mlen, nlen, tlen;
     uint8_t *encrypted_data;
     uint8_t *len_buf;
+
+    /*** Already Dissected Packets ***/
+    if (PINFO_FD_VISITED(pinfo))
+    {
+        /*** Lookup Message Info ***/
+        pkt = (ss_packet_info_t *)p_get_proto_data(wmem_file_scope(), pinfo, proto_ss, 0);
+        msg = pkt ? pkt->messages : NULL;
+        while (msg)
+        {
+            if (msg->offset == offset + tvb_raw_offset(tvb))
+                return msg->cipher_len;
+            msg = msg->next;
+        }
+        /* Two cases:
+         * 1. The message info is not stored properly when decrypting. (Should not happen)
+         * 2. The message is incomplete and the dissection will be done later. (It's OK)
+         */
+        return 0;
+    }
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -296,25 +268,20 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
         return 1;
     }
     is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
-
     cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
-    if (!cipher_ctx->init)
-    { /* Should not happen */
-        ws_critical("[%u] %s: Cipher context is not initialized", pinfo->num, __func__);
-        return 1;
-    }
     nlen = cipher_ctx->cipher->nonce_len;
     tlen = cipher_ctx->cipher->tag_len;
 
+    /*** Length of Salt ***/
+    if (!cipher_ctx->init)
+        return cipher_ctx->cipher->key_len;
+
+    /*** Length of Encrypted Data ***/
     if (tvb_captured_length_remaining(tvb, offset) < (int)(CHUNK_SIZE_LEN + tlen))
     { /* Should not happen */
-#if SS_DEBUG
-        ws_critical("[%u] %s: %u < CHUNK_SIZE_LEN(%d) + tlen(%lu)", pinfo->num, __func__, tvb_captured_length_remaining(tvb, offset), CHUNK_SIZE_LEN, tlen);
-#endif
-        return 0;
+        ws_critical("[%u] %s: %u < CHUNK_SIZE_LEN(%d) + tlen(%u)", pinfo->num, __func__, tvb_captured_length_remaining(tvb, offset), CHUNK_SIZE_LEN, tlen);
+        return 1;
     }
-
-    /*** Decryption of Payload Length ***/
     err = ss_aead_cipher_ctx_set_key(cipher_ctx);
     if (err)
     {
@@ -328,9 +295,9 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
         return 1;
     }
 
+    /* Decryption */
     len_buf = (uint8_t *)wmem_alloc0(wmem_file_scope(), CHUNK_SIZE_LEN + tlen);
     encrypted_data = (uint8_t *)tvb_memdup(wmem_file_scope(), tvb, offset, CHUNK_SIZE_LEN + tlen);
-    // NOTE: The `outsize` should always be expected length + tag length
     err = gcry_cipher_decrypt(cipher_ctx->cipher->hd, len_buf, CHUNK_SIZE_LEN + tlen, encrypted_data, CHUNK_SIZE_LEN + tlen);
     wmem_free(wmem_file_scope(), encrypted_data);
     if (err)
@@ -352,52 +319,24 @@ unsigned get_ss_encrypted_data_len(packet_info *pinfo, tvbuff_t *tvb, int offset
     return (unsigned)(CHUNK_SIZE_LEN + tlen + mlen + tlen);
 }
 
-unsigned get_ss_message_len(packet_info *pinfo, tvbuff_t *tvb, int offset, void *data _U_)
-{
-    conversation_t *conversation;
-    ss_conv_data_t *conv_data;
-    bool is_from_server;
-    ss_cipher_ctx_t *cipher_ctx;
-
-    /*** Conversation ***/
-    conversation = find_or_create_conversation(pinfo);
-    conv_data = (ss_conv_data_t *)get_ss_conv_data(conversation, proto_ss);
-
-    /*** Direction ***/
-    if (conv_data->server_addr->data == NULL)
-    { /* Should not happen */
-        ws_critical("[%u] %s: Server address is NULL", pinfo->num, __func__);
-        return 1;
-    }
-    is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
-    cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
-
-    /*** Return Length ***/
-    if (!cipher_ctx->init)
-        return get_ss_salt_len(pinfo, tvb, offset, NULL);
-    else
-        return get_ss_encrypted_data_len(pinfo, tvb, offset, NULL);
-}
-
 /**
- * @brief An AEAD encrypted TCP stream starts with a randomly generated salt to derive the per-session subkey (client -> server).
- *  Structure:
- *  +----------+
- *  |   Salt   |
- *  +----------+
- *  | 16/24/32 |
- *  +----------+
+ * @brief Dissect the Shadowsocks message. There are several branches:
+ *  1. The message is already dissected. Just call the corresponding dissector according to the message type.
+ *  2. If the message is not dissected yet. Determine the message type and dissect it.
+ *    - If the message is a salt, derive the subkey frome it and initialize the cipher context.
+ *    - Otherwise, decrypt the payload and dissect it.
  */
-int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
-    conversation_t *conversation;
-    ss_conv_data_t *conv_data;
-    bool is_from_server;
-    ss_cipher_ctx_t *cipher_ctx;
-    int err;
+    proto_item *ti, *cipher_ctx_ti, *cipher_ctx_cipher_ti;
+    proto_tree *ss_tree, *cipher_ctx_tree, *cipher_ctx_cipher_tree;
     ss_packet_info_t *pkt;
     ss_message_info_t *msg;
-    ss_message_info_t **pmsgs;
+    tvbuff_t *decrypted_tvb;
+    conversation_t *conversation;
+    ss_conv_data_t *conv_data;
+    bool is_from_server;
+    ss_cipher_ctx_t *cipher_ctx;
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -410,143 +349,83 @@ int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *d
         return -1;
     }
     is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
-
     cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
-    if (!cipher_ctx->init)
-    { /* The first time of dissection */
-        tvb_memcpy(tvb, cipher_ctx->salt, 0, ss_crypto->cipher->key_len);
-        err = ss_aead_cipher_ctx_set_key(cipher_ctx);
-        if (err)
-        {
-            ws_critical("[%u] %s: Failed to set key: %s", pinfo->num, __func__, gcry_strerror(err));
-            return -1;
-        }
-        cipher_ctx->init = true;
-
-        /*** Storage ***/
-        pkt = (ss_packet_info_t *)p_get_proto_data(wmem_file_scope(), pinfo, proto_ss, 0);
-        if (!pkt)
-        {
-            pkt = (ss_packet_info_t *)wmem_new0(wmem_file_scope(), ss_packet_info_t);
-            pkt->is_from_server = is_from_server;
-            pkt->messages = NULL;
-            p_add_proto_data(wmem_file_scope(), pinfo, proto_ss, 0, pkt);
-        }
-
-        msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
-        msg->plain_data = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
-        msg->data_len = cipher_ctx->cipher->key_len;
-        msg->id = tvb_raw_offset(tvb);
-        msg->type = SS_SALT;
-        msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
-        msg->skey = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->skey, cipher_ctx->cipher->key_len);
-        msg->nonce = NULL;
-        /* Append to the tail */
-        msg->next = NULL;
-        pmsgs = &pkt->messages;
-        while (*pmsgs)
-            pmsgs = &(*pmsgs)->next;
-        *pmsgs = msg;
-    }
-
-    /*** Column Info & Protocol Tree ***/
-    col_append_str(pinfo->cinfo, COL_INFO, "[Salt]");
-    proto_tree_add_item(tree, hf_salt, tvb, 0, cipher_ctx->cipher->key_len, ENC_NA);
-
-    return cipher_ctx->cipher->key_len;
-}
-/**
- * @brief A relay header is typically sent after the salt by the client to the server.
- *  It contains the destination address and port that the client wants to connect to.
- *  Structure (decrypted):
- *  +------+----------+----------+
- *  | ATYP | DST.ADDR | DST.PORT |
- *  +------+----------+----------+
- *  |  1   | Variable |    2     |
- *  +------+----------+----------+
- *  ATYP: address type of following address
- *      - 0x01: IP V4 address. The DST.ADDR is a version-4 IP address, with a length of 4 octets
- *      - 0x03: DOMAINNAME. The address field contains a fully-qualified domain name.
- *          The first octet of the address field contains the number of octets of name that follow,
- *          there is no terminating NUL octet.
- *      - 0x04: IP V6 address. The DST.ADDR is a version-6 IP address, with a length of 16 octets
- *  DST.ADDR: desired destination address
- *  DST.PORT: desired destination port in network octet order
- */
-int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
-{
-    int offset = 0;
-    uint8_t atyp;
-    int host_len;
-
-    /*** Column Info & Protocol Tree ***/
-    col_append_str(pinfo->cinfo, COL_INFO, "[Relay Header]");
 
     /*** Protocol Tree ***/
-    atyp = tvb_get_guint8(tvb, offset);
-    proto_tree_add_item(tree, hf_atyp, tvb, offset++, 1, ENC_BIG_ENDIAN);
-    switch (atyp & ADDRTYPE_MASK)
+    ti = proto_tree_add_item(tree, proto_ss, tvb, 0, -1, ENC_NA);
+    ss_tree = proto_item_add_subtree(ti, ett_ss);
+    /* Cipher context */
+    cipher_ctx_ti = proto_tree_add_item(ss_tree, hf_cipher_ctx_node, tvb, 0, 0, ENC_NA);
+    proto_item_set_text(cipher_ctx_ti, "Cipher Context");
+    cipher_ctx_tree = proto_item_add_subtree(cipher_ctx_ti, ett_cipher_ctx);
+    /* Cipher */
+    cipher_ctx_cipher_ti = proto_tree_add_item(cipher_ctx_tree, hf_cipher_ctx_cipher_node, tvb, 0, 0, ENC_NA);
+    proto_item_set_text(cipher_ctx_cipher_ti, "Cipher");
+    cipher_ctx_cipher_tree = proto_item_add_subtree(cipher_ctx_cipher_ti, ett_cipher_ctx_cipher);
+    proto_item_set_generated(proto_tree_add_int(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_method, tvb, 0, 0, cipher_ctx->cipher->method));
+    proto_item_set_generated(proto_tree_add_string(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_password, tvb, 0, 0, pref_password));
+    proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key, tvb, 0, 0, cipher_ctx->cipher->key, cipher_ctx->cipher->key_len));
+    proto_item_set_generated(proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_nonce_len, tvb, 0, 0, cipher_ctx->cipher->nonce_len));
+    proto_item_set_generated(proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_key_len, tvb, 0, 0, cipher_ctx->cipher->key_len));
+    proto_item_set_generated(proto_tree_add_uint(cipher_ctx_cipher_tree, hf_cipher_ctx_cipher_tag_len, tvb, 0, 0, cipher_ctx->cipher->tag_len));
+
+    /*** Already Dissected Packets ***/
+    if (PINFO_FD_VISITED(pinfo))
     {
-    case RELAY_HEADER_ATYP_IPV4:
-    {
-        // NOTE: Variable declaration must be in the block
-        ws_in4_addr in4_addr = tvb_get_ipv4(tvb, offset);
-        host_len = sizeof(struct in_addr);
-        proto_tree_add_ipv4(tree, hf_dst_addr_ipv4, tvb, offset, host_len, in4_addr);
-        break;
+        /*** Lookup Message Info ***/
+        pkt = (ss_packet_info_t *)p_get_proto_data(wmem_file_scope(), pinfo, proto_ss, 0);
+        msg = pkt ? pkt->messages : NULL;
+        while (msg)
+        {
+            if (msg->offset == tvb_raw_offset(tvb))
+                break;
+            msg = msg->next;
+        }
+
+        if (!msg)
+        { /* Should not happen */
+            ws_critical("[%u] %s: Failed to find message info at offset %d", pinfo->num, __func__, tvb_raw_offset(tvb));
+            return -1;
+        }
+
+        if (msg->type == SS_RELAY_HEADER || msg->type == SS_STREAM_DATA)
+        {
+            /* Protocol tree */
+            proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_salt, tvb, 0, 0, msg->salt, cipher_ctx->cipher->key_len));
+            proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_skey, tvb, 0, 0, msg->skey, cipher_ctx->cipher->key_len));
+            proto_item_set_generated(proto_tree_add_bytes_with_length(cipher_ctx_tree, hf_cipher_ctx_nonce, tvb, 0, 0, msg->nonce, cipher_ctx->cipher->nonce_len));
+            /* TVB */
+            decrypted_tvb = tvb_new_child_real_data(tvb, msg->plain_data, msg->plain_len, msg->plain_len);
+            add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks Data");
+        }
+
+        switch (msg->type)
+        {
+        case SS_UNKNOWN:
+            col_append_str(pinfo->cinfo, COL_INFO, "[Unknown]");
+            break;
+        case SS_SALT:
+            dissect_ss_salt(tvb, pinfo, ss_tree, NULL);
+            break;
+        case SS_RELAY_HEADER:
+            dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, NULL);
+            break;
+        case SS_STREAM_DATA:
+            dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, NULL);
+            break;
+        default:
+            ws_critical("[%u] %s: Unknown message type: %d", pinfo->num, __func__, msg->type);
+            break;
+        }
+
+        return tvb_captured_length(tvb);
     }
-    case RELAY_HEADER_ATYP_DOMAINNAME:
-        host_len = (int)tvb_get_guint8(tvb, offset);
-        proto_tree_add_item(tree, hf_dst_addr_domainname_len, tvb, offset++, 1, ENC_BIG_ENDIAN);
-        proto_tree_add_item(tree, hf_dst_addr_domainname, tvb, offset, host_len, ENC_ASCII);
-        break;
-    case RELAY_HEADER_ATYP_IPV6:
-    {
-        // NOTE: Variable declaration must be in the block
-        ws_in6_addr *in6_addr = wmem_new0(wmem_file_scope(), ws_in6_addr);
-        tvb_get_ipv6(tvb, offset, in6_addr);
-        host_len = sizeof(struct in6_addr);
-        proto_tree_add_ipv6(tree, hf_dst_addr_ipv6, tvb, offset, host_len, in6_addr);
-        break;
-    }
-    default:
-        // TODO: expert item
-        ws_critical("[%u] Invalid ATYP value: %d", pinfo->num, atyp);
-        return -1;
-    }
-    offset += host_len;
-    proto_tree_add_item(tree, hf_dst_port, tvb, offset, 2, ENC_BIG_ENDIAN);
 
-    return tvb_captured_length(tvb);
-}
-
-int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
-{
-    conversation_t *conversation;
-    ss_conv_data_t *conv_data;
-    dissector_handle_t http_handle, tls_handle;
-
-    /*** Conversation ***/
-    conversation = find_or_create_conversation(pinfo);
-    conv_data = (ss_conv_data_t *)get_ss_conv_data(conversation, proto_ss);
-
-    /* Call subdissectors */
-    tls_handle = find_dissector("tls");
-    reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
-                                                    tvb_captured_length_remaining(tvb, 0),
-                                                    tree, proto_tree_get_parent_tree(tree),
-                                                    proto_ss_streaming_reassembly_table,
-                                                    conv_data->reassembly_info,
-                                                    get_virtual_frame_num64(tvb, pinfo, 0),
-                                                    tls_handle,
-                                                    proto_tree_get_parent_tree(tree),
-                                                    NULL,
-                                                    "Shadowsocks",
-                                                    &msg_frag_items, hf_msg_body_segment);
-    http_handle = find_dissector("http");
-    call_dissector(http_handle, tvb, pinfo, tree);
-
-    return tvb_captured_length(tvb);
+    /*** Call Dissectors ***/
+    if (!cipher_ctx->init)
+        return dissect_ss_salt(tvb, pinfo, ss_tree, NULL);
+    else
+        return dissect_ss_encrypted_data(tvb, pinfo, ss_tree, NULL);
 }
 
 int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
@@ -622,8 +501,9 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
 
     msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
     msg->plain_data = wmem_memdup(wmem_file_scope(), plaintext, *plen);
-    msg->data_len = *plen;
-    msg->id = tvb_raw_offset(tvb);
+    msg->plain_len = *plen;
+    msg->cipher_len = tvb_captured_length(tvb);
+    msg->offset = tvb_raw_offset(tvb);
     msg->type = (!is_from_server && !conv_data->relay_header_dissection_done) ? SS_RELAY_HEADER : SS_STREAM_DATA;
     msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
     msg->skey = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->skey, cipher_ctx->cipher->key_len);
@@ -656,12 +536,27 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
     return tvb_captured_length(tvb);
 }
 
-int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+/**
+ * @brief An AEAD encrypted TCP stream starts with a randomly generated salt to derive the per-session subkey (client -> server).
+ *  Structure:
+ *  +----------+
+ *  |   Salt   |
+ *  +----------+
+ *  | 16/24/32 |
+ *  +----------+
+ */
+int dissect_ss_salt(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
 {
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
     bool is_from_server;
     ss_cipher_ctx_t *cipher_ctx;
+    int err;
+    ss_packet_info_t *pkt;
+    ss_message_info_t *msg;
+    ss_message_info_t **pmsgs;
+    proto_item *salt_ti;
+    proto_tree *salt_tree;
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);
@@ -674,13 +569,159 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
         return -1;
     }
     is_from_server = addresses_equal(&pinfo->src, conv_data->server_addr);
-    cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
 
-    /*** Call Dissectors ***/
+    cipher_ctx = is_from_server ? conv_data->server_cipher_ctx : conv_data->client_cipher_ctx;
     if (!cipher_ctx->init)
-        return dissect_ss_salt(tvb, pinfo, tree, NULL);
-    else
-        return dissect_ss_encrypted_data(tvb, pinfo, tree, NULL);
+    { /* The first time of dissection */
+        tvb_memcpy(tvb, cipher_ctx->salt, 0, ss_crypto->cipher->key_len);
+        err = ss_aead_cipher_ctx_set_key(cipher_ctx);
+        if (err)
+        {
+            ws_critical("[%u] %s: Failed to set key: %s", pinfo->num, __func__, gcry_strerror(err));
+            return -1;
+        }
+        cipher_ctx->init = true;
+
+        /*** Storage ***/
+        pkt = (ss_packet_info_t *)p_get_proto_data(wmem_file_scope(), pinfo, proto_ss, 0);
+        if (!pkt)
+        {
+            pkt = (ss_packet_info_t *)wmem_new0(wmem_file_scope(), ss_packet_info_t);
+            pkt->is_from_server = is_from_server;
+            pkt->messages = NULL;
+            p_add_proto_data(wmem_file_scope(), pinfo, proto_ss, 0, pkt);
+        }
+
+        msg = wmem_new0(wmem_file_scope(), ss_message_info_t);
+        msg->plain_data = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
+        msg->plain_len = cipher_ctx->cipher->key_len;
+        msg->cipher_len = cipher_ctx->cipher->key_len;
+        msg->offset = tvb_raw_offset(tvb);
+        msg->type = SS_SALT;
+        msg->salt = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->salt, cipher_ctx->cipher->key_len);
+        msg->skey = (uint8_t *)wmem_memdup(wmem_file_scope(), cipher_ctx->skey, cipher_ctx->cipher->key_len);
+        msg->nonce = NULL;
+        /* Append to the tail */
+        msg->next = NULL;
+        pmsgs = &pkt->messages;
+        while (*pmsgs)
+            pmsgs = &(*pmsgs)->next;
+        *pmsgs = msg;
+    }
+
+    /*** Column Info & Protocol Tree ***/
+    col_append_str(pinfo->cinfo, COL_INFO, "[Salt]");
+    salt_ti = proto_tree_add_item(tree, hf_salt_node, tvb, 0, -1, ENC_NA);
+    salt_tree = proto_item_add_subtree(salt_ti, ett_ss);
+    proto_tree_add_item(salt_tree, hf_salt, tvb, 0, cipher_ctx->cipher->key_len, ENC_NA);
+
+    return cipher_ctx->cipher->key_len;
+}
+
+/**
+ * @brief A relay header is typically sent after the salt by the client to the server.
+ *  It contains the destination address and port that the client wants to connect to.
+ *  Structure (decrypted):
+ *  +------+----------+----------+
+ *  | ATYP | DST.ADDR | DST.PORT |
+ *  +------+----------+----------+
+ *  |  1   | Variable |    2     |
+ *  +------+----------+----------+
+ *  ATYP: address type of following address
+ *      - 0x01: IP V4 address. The DST.ADDR is a version-4 IP address, with a length of 4 octets
+ *      - 0x03: DOMAINNAME. The address field contains a fully-qualified domain name.
+ *          The first octet of the address field contains the number of octets of name that follow,
+ *          there is no terminating NUL octet.
+ *      - 0x04: IP V6 address. The DST.ADDR is a version-6 IP address, with a length of 16 octets
+ *  DST.ADDR: desired destination address
+ *  DST.PORT: desired destination port in network octet order
+ */
+int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+{
+    proto_item *relay_header_ti;
+    proto_tree *relay_header_tree;
+    int offset = 0;
+    uint8_t atyp;
+    int host_len;
+
+    /*** Column Info & Protocol Tree ***/
+    col_append_str(pinfo->cinfo, COL_INFO, "[Relay Header]");
+
+    /*** Protocol Tree ***/
+    relay_header_ti = proto_tree_add_item(tree, hf_relay_header_node, tvb, 0, -1, ENC_NA);
+    relay_header_tree = proto_item_add_subtree(relay_header_ti, ett_ss);
+    atyp = tvb_get_guint8(tvb, offset);
+    proto_tree_add_item(relay_header_tree, hf_atyp, tvb, offset++, 1, ENC_BIG_ENDIAN);
+    switch (atyp & ADDRTYPE_MASK)
+    {
+    case RELAY_HEADER_ATYP_IPV4:
+    {
+        // NOTE: Variable declaration must be in the block
+        ws_in4_addr in4_addr = tvb_get_ipv4(tvb, offset);
+        host_len = sizeof(struct in_addr);
+        proto_tree_add_ipv4(relay_header_tree, hf_dst_addr_ipv4, tvb, offset, host_len, in4_addr);
+        break;
+    }
+    case RELAY_HEADER_ATYP_DOMAINNAME:
+        host_len = (int)tvb_get_guint8(tvb, offset);
+        proto_tree_add_item(relay_header_tree, hf_dst_addr_domainname_len, tvb, offset++, 1, ENC_BIG_ENDIAN);
+        proto_tree_add_item(relay_header_tree, hf_dst_addr_domainname, tvb, offset, host_len, ENC_ASCII);
+        break;
+    case RELAY_HEADER_ATYP_IPV6:
+    {
+        // NOTE: Variable declaration must be in the block
+        ws_in6_addr *in6_addr = wmem_new0(wmem_file_scope(), ws_in6_addr);
+        tvb_get_ipv6(tvb, offset, in6_addr);
+        host_len = sizeof(struct in6_addr);
+        proto_tree_add_ipv6(relay_header_tree, hf_dst_addr_ipv6, tvb, offset, host_len, in6_addr);
+        break;
+    }
+    default:
+        // TODO: expert item
+        ws_critical("[%u] Invalid ATYP value: %d", pinfo->num, atyp);
+        return -1;
+    }
+    offset += host_len;
+    proto_tree_add_item(relay_header_tree, hf_dst_port, tvb, offset, 2, ENC_BIG_ENDIAN);
+
+    return tvb_captured_length(tvb);
+}
+
+int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+{
+    proto_item *stream_data_ti;
+    proto_tree *stream_data_tree;
+    conversation_t *conversation;
+    ss_conv_data_t *conv_data;
+    dissector_handle_t tls_handle;
+    // dissector_handle_t http_handle;
+
+    /*** Column Info & Protocol Tree ***/
+    col_append_str(pinfo->cinfo, COL_INFO, "[Stream Data]");
+    stream_data_ti = proto_tree_add_item(tree, hf_stream_data_node, tvb, 0, -1, ENC_NA);
+    stream_data_tree = proto_item_add_subtree(stream_data_ti, ett_ss);
+
+    /*** Conversation ***/
+    conversation = find_or_create_conversation(pinfo);
+    conv_data = (ss_conv_data_t *)get_ss_conv_data(conversation, proto_ss);
+
+    /* Call subdissectors */
+    tls_handle = find_dissector("tls");
+    reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
+                                                    tvb_captured_length_remaining(tvb, 0),
+                                                    stream_data_tree, proto_tree_get_parent_tree(tree),
+                                                    proto_ss_streaming_reassembly_table,
+                                                    conv_data->reassembly_info,
+                                                    get_virtual_frame_num64(tvb, pinfo, 0),
+                                                    tls_handle,
+                                                    proto_tree_get_parent_tree(tree),
+                                                    NULL,
+                                                    "Shadowsocks",
+                                                    &msg_frag_items, hf_msg_body_segment);
+    // http_handle = find_dissector("http");
+    // call_dissector(http_handle, tvb, pinfo, tree);
+
+    return tvb_captured_length(tvb);
 }
 
 /**************************************************/
@@ -700,9 +741,9 @@ void proto_register_ss(void)
     /*** Header Fields ***/
     static hf_register_info hf[] = {
         /* Cipher Context */
-        {&hf_cipher_ctx,
+        {&hf_cipher_ctx_node,
          {"Cipher Context",
-          "shadowsocks.cipher_ctx",
+          "shadowsocks.cipher_ctx_node",
           FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_salt,
@@ -720,9 +761,9 @@ void proto_register_ss(void)
           "shadowsocks.cipher_ctx.nonce",
           FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
-        {&hf_cipher_ctx_cipher,
+        {&hf_cipher_ctx_cipher_node,
          {"Cipher",
-          "shadowsocks.cipher_ctx.cipher",
+          "shadowsocks.cipher_ctx.cipher_node",
           FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         {&hf_cipher_ctx_cipher_method,
@@ -756,12 +797,22 @@ void proto_register_ss(void)
           FT_UINT8, BASE_DEC,
           NULL, 0x0, NULL, HFILL}},
         /* Salt */
+        {&hf_salt_node,
+         {"Shadowsocks - Salt",
+          "shadowsocks.salt_node",
+          FT_NONE, BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
         {&hf_salt,
          {"Salt",
           "shadowsocks.salt",
           FT_BYTES, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         /* Relay Header */
+        {&hf_relay_header_node,
+         {"Shadowsocks - Relay Header",
+          "shadowsocks.relay_header_node",
+          FT_NONE, BASE_NONE,
+          NULL, 0x0, NULL, HFILL}},
         {&hf_atyp,
          {"Address Type",
           "shadowsocks.atyp",
@@ -791,6 +842,12 @@ void proto_register_ss(void)
          {"Destination Port",
           "shadowsocks.dst_port",
           FT_UINT16, BASE_DEC,
+          NULL, 0x0, NULL, HFILL}},
+        /* Stream Data */
+        {&hf_stream_data_node,
+         {"Shadowsocks - Stream Data",
+          "shadowsocks.stream_data_node",
+          FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
         /* Reassembly Info */
         {&hf_msg_fragments,
@@ -991,7 +1048,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
     if (clen <= 2 * tlen + CHUNK_SIZE_LEN)
     {
 #if SS_DEBUG
-        ws_message("%s: %lu <= 2 * tlen(%lu) + CHUNK_SIZE_LEN(%d)", __func__, clen, tlen, CHUNK_SIZE_LEN);
+        ws_message("%s: %u <= 2 * tlen(%u) + CHUNK_SIZE_LEN(%d)", __func__, clen, tlen, CHUNK_SIZE_LEN);
 #endif
         return RET_CRYPTO_NEED_MORE;
     }
@@ -1032,7 +1089,7 @@ int ss_aead_decrypt(ss_cipher_ctx_t *cipher_ctx, uint8_t **p, uint8_t *c, uint8_
     if (clen < chunk_len)
     {
 #if SS_DEBUG
-        ws_message("%s: %lu < 2 * tlen(%lu) + CHUNK_SIZE_LEN(%d) + mlen(%lu)", __func__, clen, tlen, CHUNK_SIZE_LEN, mlen);
+        ws_message("%s: %u < 2 * tlen(%u) + CHUNK_SIZE_LEN(%d) + mlen(%u)", __func__, clen, tlen, CHUNK_SIZE_LEN, mlen);
 #endif
         return RET_CRYPTO_NEED_MORE;
     }
@@ -1454,7 +1511,6 @@ int validate_hostname(const char *hostname, const int hostname_len)
 /**************************************************/
 /*                    Debugging                   */
 /**************************************************/
-/*
 void debug_print_uint_key_int_value(const void *key, const void *value, void *user_data)
 {
     char *buf = (char *)user_data;
@@ -1530,7 +1586,6 @@ void debug_print_tvb(tvbuff_t *tvb, const char *var_name)
     }
     ws_message("%s", buf);
 }
-*/
 
 /*
  * Editor modelines  -  https://www.wireshark.org/tools/modelines.html

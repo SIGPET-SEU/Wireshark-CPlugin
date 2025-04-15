@@ -1728,13 +1728,13 @@ proto_register_vmess(void)
             {"Message fragment count", "vmess.msg.fragment.count",
             FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_reassembled_in,
-            {"Reassembled in", "vmess.msg.reassembled.in",
+            {"Reassembled in", "vmess.reassembled_in",
             FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_reassembled_length,
             {"Reassembled length", "vmess.msg.reassembled.length",
             FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
         { &hf_msg_body_segment,
-            {"VMess body segment", "vmess.msg.body.segment",
+            {"VMess segment", "vmess.segment_data",
             FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL } },
     };
 

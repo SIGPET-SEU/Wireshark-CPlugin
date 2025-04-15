@@ -160,7 +160,7 @@ static const fragment_items msg_frag_items = {
     &hf_msg_reassembled_in,
     &hf_msg_reassembled_length,
     &hf_msg_reassembled_data,
-    "Segments"
+    "VMess Message fragments",
 };
 
 static GString* kdfSaltConstAuthIDEncryptionKey;

@@ -130,6 +130,22 @@ static int hf_vmess_response_cmd_len;   /* Response Option, set to 0, not used i
 
 static int hf_vmess_payload_len;
 
+static int hf_vmess_layer_type;         /* Used to indicate the type (Request, Response, Data) of a VMess layer */
+
+#if 0
+#define UNKNOWN     (guint8) 0
+#endif
+#define REQUEST     (guint8) 1
+#define RESPONSE    (guint8) 2
+#define DATA        (guint8) 3
+
+static const value_string layer_type[] = {
+        { REQUEST, "Request" },
+        { RESPONSE, "Response" },
+        { DATA, "Data" },
+        { 0, NULL },
+};
+
 
 // heads for displaying reassembly information
 REASSEMBLE_ITEMS_DEFINE(msg, "VMess Message");
@@ -343,6 +359,9 @@ int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tre
 
     proto_tree_add_item(tree, hf_vmess_respV, packet_tvb, 33, 1, ENC_BIG_ENDIAN);
 
+    /* COMMENT: If the type is not related to any actual bytes within a tvb, how to specify the offset/length? */
+    proto_tree_add_uint(tree, hf_vmess_layer_type, packet_tvb, 0, 1, REQUEST); 
+
     /* Dissect Opt as a subtree and add human-friendly info */
     guint8 opt = (guint8)plaintext[34];
     opt_ti = proto_tree_add_uint(tree, hf_vmess_request_opt, packet_tvb, 34, 1, opt);
@@ -390,6 +409,9 @@ int dissect_decrypted_vmess_response(tvbuff_t* tvb, packet_info* pinfo, proto_tr
 
     proto_tree_add_item(vmess_tree, hf_vmess_respV, packet_tvb, 0, 1, ENC_BIG_ENDIAN);
 
+    /* COMMENT: If the type is not related to any actual bytes within a tvb, how to specify the offset/length? */
+    proto_tree_add_uint(vmess_tree, hf_vmess_layer_type, packet_tvb, 0, 1, RESPONSE);
+
     ///* Dissect Opt as a subtree and add human-friendly info */
     //guint8 opt = (guint8)plaintext[1];
     proto_tree_add_item(vmess_tree, hf_vmess_response_opt, packet_tvb, 1, 1, ENC_BIG_ENDIAN);
@@ -434,6 +456,10 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
 
     pinfo->ptype = save_port_type;
     pinfo->can_desegment = save_can_desegment;
+
+    /* COMMENT: If the type is not related to any actual bytes within a tvb, how to specify the offset/length? */
+    proto_tree_add_uint(vmess_tree, hf_vmess_layer_type, packet_tvb, 0, 1, DATA);
+
     guint offset = VMESS_DATA_HEADER_LENGTH + plaintext_len + GCM_TAG_SIZE;
     return offset;
 }
@@ -1708,9 +1734,15 @@ proto_register_vmess(void)
             NULL, HFILL }
         },
         { &hf_vmess_payload_len,
-            {"VMess Payload Length", "vmess.payload.length",
+            {"Payload Length", "vmess.payload.length",
             FT_UINT16, BASE_DEC,
             NULL, 0x0,
+            NULL, HFILL }
+        }, 
+        { &hf_vmess_layer_type,
+            {"Layer Type", "vmess.layer_type",
+            FT_UINT8, BASE_DEC,
+            VALS(layer_type), 0x0,
             NULL, HFILL }
         },
         // VMess Fragment

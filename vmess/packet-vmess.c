@@ -54,11 +54,8 @@ static int proto_vmess;
 
 /****************VMess Fields******************/
 static int hf_vmess_request_auth;
-static int hf_vmess_respV;
-static int hf_vmess_request_length;
+static int hf_vmess_request_len;
 static int hf_vmess_request_conn_nonce;
-static int hf_vmess_response_header;
-static int hf_vmess_payload_length;
 
 /**
  * MSB          ---->            LSB
@@ -124,9 +121,14 @@ static int hf_vmess_request_addr;       /* Address */
 
 static int hf_vmess_request_checksum;   /* Request checksum */
 
+static int hf_vmess_respV;
+static int hf_vmess_response_header;
+
 static int hf_vmess_response_opt;       /* Response Option, set to 0, not used in Clash Implement */
 static int hf_vmess_response_cmd;       /* Response Command, set to 0, not used in Clash Implement */
 static int hf_vmess_response_cmd_len;   /* Response Option, set to 0, not used in Clash Implement */
+
+static int hf_vmess_payload_len;
 
 
 // heads for displaying reassembly information
@@ -323,7 +325,7 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
 
     vmess_message_info_t* msg = get_vmess_message(pinfo, tvb_raw_offset(tvb));
 
-    proto_tree_add_uint(vmess_tree, hf_vmess_request_length, tvb, 0, 0, msg->data_len);
+    proto_tree_add_uint(vmess_tree, hf_vmess_request_len, tvb, 0, 0, msg->data_len);
     dissect_decrypted_vmess_request(tvb, pinfo, vmess_tree, msg);
 
     return 0;
@@ -415,7 +417,7 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
 
     ti = proto_tree_add_item(tree, proto_vmess, tvb, 0, -1, ENC_NA);
     vmess_tree = proto_item_add_subtree(ti, ett_vmess);
-    proto_tree_add_item(vmess_tree, hf_vmess_payload_length, tvb, 0, 2, ENC_BIG_ENDIAN);
+    proto_tree_add_item(vmess_tree, hf_vmess_payload_len, tvb, 0, 2, ENC_BIG_ENDIAN);
 
     tvbuff_t* packet_tvb = tvb_new_child_real_data(tvb, plaintext, plaintext_len, plaintext_len);
     add_new_data_source(pinfo, packet_tvb, "Decrypted VMess Data");
@@ -1584,19 +1586,13 @@ proto_register_vmess(void)
             NULL, 0x0,
             NULL, HFILL }
         },
-        { &hf_vmess_respV,
-            {"RespV", "vmess.respV",
-            FT_BYTES, BASE_NONE,
-            NULL, 0x0,
-            NULL, HFILL }
-        },
         { &hf_vmess_request_conn_nonce,
             {"Connection Nonce", "vmess.request.conn_nonce",
             FT_BYTES, BASE_NONE,
             NULL, 0x0,
             NULL, HFILL }
         },
-        { &hf_vmess_request_length,
+        { &hf_vmess_request_len,
             {"Request Length", "vmess.request.length",
             FT_UINT16, BASE_DEC,
             NULL, 0x0,
@@ -1687,9 +1683,9 @@ proto_register_vmess(void)
             NULL, 0x0,
             NULL, HFILL }
         },
-        { &hf_vmess_payload_length,
-            {"VMess Payload Length", "vmess.payload.length",
-            FT_UINT16, BASE_DEC,
+        { &hf_vmess_respV,
+            {"RespV", "vmess.respV",
+            FT_BYTES, BASE_NONE,
             NULL, 0x0,
             NULL, HFILL }
         },
@@ -1700,7 +1696,7 @@ proto_register_vmess(void)
             NULL, HFILL }
         },
         { &hf_vmess_response_cmd,
-            { "VMess Response Command (Not used in Clash Implement)", "vmess.response.cmd",
+            { "Response Command (Not used in Clash Implement)", "vmess.response.cmd",
             FT_UINT8, BASE_HEX,
             NULL, 0x0,
             NULL, HFILL }
@@ -1708,6 +1704,12 @@ proto_register_vmess(void)
         { &hf_vmess_response_cmd_len,
             { "Response Command Length (Not used in Clash Implement)", "vmess.response.opt_len",
             FT_UINT8, BASE_DEC,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_payload_len,
+            {"VMess Payload Length", "vmess.payload.length",
+            FT_UINT16, BASE_DEC,
             NULL, 0x0,
             NULL, HFILL }
         },

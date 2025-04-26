@@ -33,6 +33,7 @@ const true_false_string tfs_set_notset_vmess = { "Set", "Not set" };
 #define VMESS_TCP_PORT_RANGE "20332, 20002, 10006, 20016"
 
 #define VMESS_AUTH_LENGTH (guint) 16
+#define VMESS_CHECKSUM_LENGTH (guint) 4
 #define VMESS_RESPONSE_HEADER_LENGTH (guint) 38 /* TODO: Consider change it to 38 */
 #define VMESS_RESPV_LENGTH (guint) 1
 #define VMESS_RESPONSE_HEADER_AEAD_LENGTH_SIZE (guint) 2

@@ -122,6 +122,8 @@ static int hf_vmess_request_addr_len;   /* Address length, this is used in Clash
 static int hf_vmess_request_addr_type;  /* Address type */
 static int hf_vmess_request_addr;       /* Address */
 
+static int hf_vmess_request_checksum;   /* Request checksum */
+
 // heads for displaying reassembly information
 REASSEMBLE_ITEMS_DEFINE(msg, "VMess Message");
 /**************VMess Fields End****************/
@@ -357,6 +359,7 @@ int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tre
     proto_tree_add_item(tree, hf_vmess_request_addr, packet_tvb, 42, N, ENC_ASCII);
 
     /* TODO: Check F and log possible warnings */
+    proto_tree_add_item(tree, hf_vmess_request_checksum, packet_tvb, 43, VMESS_CHECKSUM_LENGTH, ENC_BIG_ENDIAN);
 
     return 0;
 }
@@ -1662,6 +1665,12 @@ proto_register_vmess(void)
         { &hf_vmess_request_addr,
             {"Address", "vmess.request.addr",
             FT_STRING, BASE_NONE,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_checksum,
+            {"Checksum", "vmess.request.checksum",
+            FT_BYTES, BASE_NONE,
             NULL, 0x0,
             NULL, HFILL }
         },

@@ -118,7 +118,8 @@ static const value_string request_addr_type[] = {
         { 0, NULL },
 };
 
-static int hf_vmess_request_addr_type;       /* Address type */
+static int hf_vmess_request_addr_len;   /* Address length, this is used in Clash Imple.*/
+static int hf_vmess_request_addr_type;  /* Address type */
 static int hf_vmess_request_addr;       /* Address */
 
 // heads for displaying reassembly information
@@ -351,8 +352,9 @@ int dissect_decrypted_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tre
     proto_tree_add_uint(tree, hf_vmess_request_port, packet_tvb, 38, 2, port);
 
     proto_tree_add_uint(tree, hf_vmess_request_addr_type, packet_tvb, 40, 1, plaintext[40]);
-    guint N = plaintext_len - 4 - (guint)((plaintext[35] & PADDING_MASK) >> 4) - 41; /* Compute the length of addr */
-    proto_tree_add_item(tree, hf_vmess_request_addr, packet_tvb, 41, N, ENC_ASCII);
+    guint N = (guint)plaintext[41]; /* Compute the length of addr */
+    proto_tree_add_uint(tree, hf_vmess_request_addr_len, packet_tvb, 41, 1, N);
+    proto_tree_add_item(tree, hf_vmess_request_addr, packet_tvb, 42, N, ENC_ASCII);
 
     /* TODO: Check F and log possible warnings */
 
@@ -1641,6 +1643,12 @@ proto_register_vmess(void)
         { &hf_vmess_request_port,
             {"Port", "vmess.request.port",
             FT_UINT16, BASE_DEC,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_vmess_request_addr_len,
+            {"Address Length", "vmess.request.addr_len",
+            FT_UINT8, BASE_DEC,
             NULL, 0x0,
             NULL, HFILL }
         },

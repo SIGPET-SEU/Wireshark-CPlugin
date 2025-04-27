@@ -449,10 +449,22 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
     save_can_desegment = pinfo->can_desegment;
     pinfo->can_desegment = pinfo->saved_can_desegment;
 
-    reassemble_streaming_data_and_call_subdissector(packet_tvb, pinfo, 0, tvb_reported_length_remaining(packet_tvb, 0),
-        vmess_tree, proto_tree_get_parent_tree(vmess_tree), proto_vmess_streaming_reassembly_table,
-        conv_data->reassembly_info, get_virtual_frame_num64(packet_tvb, pinfo, 0), tls_handle,
-        proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_fragment_items, hf_msg_segment);
+    /* Try heuristic dissector on short, Out-of-Order (?) VMess segments */
+    gboolean is_complete_tls = FALSE;
+    if (memcmp(plaintext, "\x17\x03\x03", 3) == 0) { // Such segments should "look like" TLS packets
+        guint possible_tls_len = ((guint)plaintext[3] << 8) + (guint)(plaintext[4]);
+        if (plaintext_len == possible_tls_len + 5) {
+            is_complete_tls = TRUE;
+            call_dissector(tls_handle, packet_tvb, pinfo, tree);
+        }
+    }
+
+    if (!is_complete_tls) {
+        reassemble_streaming_data_and_call_subdissector(packet_tvb, pinfo, 0, tvb_reported_length_remaining(packet_tvb, 0),
+            vmess_tree, proto_tree_get_parent_tree(vmess_tree), proto_vmess_streaming_reassembly_table,
+            conv_data->reassembly_info, get_virtual_frame_num64(packet_tvb, pinfo, 0), tls_handle,
+            proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_fragment_items, hf_msg_segment);
+    }
 
     pinfo->ptype = save_port_type;
     pinfo->can_desegment = save_can_desegment;

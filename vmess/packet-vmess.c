@@ -469,9 +469,6 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
     pinfo->ptype = save_port_type;
     pinfo->can_desegment = save_can_desegment;
 
-    /* COMMENT: If the type is not related to any actual bytes within a tvb, how to specify the offset/length? */
-    proto_tree_add_uint(vmess_tree, hf_vmess_layer_type, packet_tvb, 0, 1, DATA);
-
     guint offset = VMESS_DATA_HEADER_LENGTH + plaintext_len + GCM_TAG_SIZE;
     return offset;
 }
@@ -828,6 +825,8 @@ int dissect_vmess_data_pdu(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _
     vmess_message_info_t* data_msg = get_vmess_message(pinfo, tvb_raw_offset(data_chunk_tvb));
     if (data_msg) {
         dissect_decrypted_vmess_data(data_chunk_tvb, pinfo, tree, vmess_tree, data_msg, conv_data);
+        /* COMMENT: If the type is not related to any actual bytes within a tvb, how to specify the offset/length? */
+        proto_tree_add_uint(vmess_tree, hf_vmess_layer_type, tvb, 0, 1, DATA);
     }
     offset += data_chunk_length;
 

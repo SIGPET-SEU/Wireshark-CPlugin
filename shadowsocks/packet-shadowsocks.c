@@ -75,6 +75,14 @@ static int hf_dst_addr_ipv6;
 static int hf_dst_port;
 /* Stream Data */
 static int hf_stream_data_node;
+/* Layer Type */
+static int hf_layer_type;
+static const value_string layer_type[] = {
+        { SS_SALT, "Salt" },
+        { SS_RELAY_HEADER, "Relay Header" },
+        { SS_STREAM_DATA, "Data" },
+        { 0, NULL },
+};
 /* Reassembly Info */
 static int hf_msg_fragments;
 static int hf_msg_fragment;
@@ -387,6 +395,8 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
             ws_critical("[%u] %s: Failed to find message info at offset %d", pinfo->num, __func__, tvb_raw_offset(tvb));
             return -1;
         }
+
+        proto_tree_add_uint(ss_tree, hf_layer_type, tvb, 0, 1, msg->type);
 
         if (msg->type == SS_RELAY_HEADER || msg->type == SS_STREAM_DATA)
         {
@@ -865,6 +875,13 @@ void proto_register_ss(void)
           "shadowsocks.stream_data_node",
           FT_NONE, BASE_NONE,
           NULL, 0x0, NULL, HFILL}},
+        /* Layer Type */
+        {&hf_layer_type,
+         {"Layer Type",
+          "shadowsocks.layer_type",
+          FT_UINT8, BASE_DEC,
+          VALS(layer_type), 0x0,
+          NULL, HFILL }},
         /* Reassembly Info */
         {&hf_msg_fragments,
          {"Reassembled Shadowsocks Message fragments",

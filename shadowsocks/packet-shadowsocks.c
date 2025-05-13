@@ -707,17 +707,33 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, 
 
     /* Call subdissectors */
     tls_handle = find_dissector("tls");
-    reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
-                                                    tvb_captured_length_remaining(tvb, 0),
-                                                    stream_data_tree, proto_tree_get_parent_tree(tree),
-                                                    proto_ss_streaming_reassembly_table,
-                                                    conv_data->reassembly_info,
-                                                    get_virtual_frame_num64(tvb, pinfo, 0),
-                                                    tls_handle,
-                                                    proto_tree_get_parent_tree(tree),
-                                                    NULL,
-                                                    "Shadowsocks",
-                                                    &msg_frag_items, hf_msg_body_segment);
+
+    /* Try heuristic dissector on short, Out-of-Order (?) SS segments */
+    gboolean is_complete_tls = FALSE;
+    /* COMMENT: Shall we check if the tvb size is larger than 3? */
+    const gchar* plaintext = tvb_get_ptr(tvb, 0, 3);
+    guint plaintext_len = tvb_captured_length_remaining(tvb, 0);
+    if (memcmp(plaintext, "\x17\x03\x03", 3) == 0) { // Such segments should "look like" TLS packets
+        guint possible_tls_len = ((guint)plaintext[3] << 8) + (guint)(plaintext[4]);
+        if (plaintext_len == possible_tls_len + 5) {
+            is_complete_tls = TRUE;
+            call_dissector_only(tls_handle, tvb, pinfo, tree, NULL);
+        }
+    }
+    if (!is_complete_tls) {
+        reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
+                                                        tvb_captured_length_remaining(tvb, 0),
+                                                        stream_data_tree, proto_tree_get_parent_tree(tree),
+                                                        proto_ss_streaming_reassembly_table,
+                                                        conv_data->reassembly_info,
+                                                        get_virtual_frame_num64(tvb, pinfo, 0),
+                                                        tls_handle,
+                                                        proto_tree_get_parent_tree(tree),
+                                                        NULL,
+                                                        "Shadowsocks",
+                                                        &msg_frag_items, hf_msg_body_segment);
+    }
+
     // http_handle = find_dissector("http");
     // call_dissector(http_handle, tvb, pinfo, tree);
 

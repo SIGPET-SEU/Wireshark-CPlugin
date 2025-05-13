@@ -987,7 +987,8 @@ void proto_register_ss(void)
 
 void proto_reg_handoff_ss(void)
 {
-    dissector_add_uint_with_preference("tcp.port", SHADOWSOCKS_TCP_PORT, ss_handle);
+    //dissector_add_uint_with_preference("tcp.port", SHADOWSOCKS_TCP_PORT, ss_handle);
+    dissector_add_uint_range_with_preference("tcp.port", SHADOWSOCKS_TCP_PORT_RANGE, ss_handle);
 }
 
 /**************************************************/

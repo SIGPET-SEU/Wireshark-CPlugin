@@ -83,6 +83,7 @@ static const value_string layer_type[] = {
         { SS_STREAM_DATA, "Data" },
         { 0, NULL },
 };
+static int hf_payload_len;
 /* Reassembly Info */
 static int hf_msg_fragments;
 static int hf_msg_fragment;
@@ -421,6 +422,7 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
             dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, NULL);
             break;
         case SS_STREAM_DATA:
+            proto_tree_add_uint(ss_tree, hf_payload_len, tvb, 0, 0, msg->plain_len);
             dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, NULL);
             break;
         default:
@@ -874,6 +876,11 @@ void proto_register_ss(void)
          {"Shadowsocks - Stream Data",
           "shadowsocks.stream_data_node",
           FT_NONE, BASE_NONE,
+          NULL, 0x0, NULL, HFILL}}, 
+        {&hf_payload_len,
+         {"Payload Length",
+          "shadowsocks.payload.length",
+          FT_UINT16, BASE_DEC, 
           NULL, 0x0, NULL, HFILL}},
         /* Layer Type */
         {&hf_layer_type,

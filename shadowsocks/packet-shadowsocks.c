@@ -423,7 +423,7 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
             break;
         case SS_STREAM_DATA:
             proto_tree_add_uint(ss_tree, hf_payload_len, tvb, 0, 0, msg->plain_len);
-            dissect_ss_stream_data(decrypted_tvb, pinfo, ss_tree, NULL);
+            dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, NULL);
             break;
         default:
             ws_critical("[%u] %s: Unknown message type: %d", pinfo->num, __func__, msg->type);
@@ -437,10 +437,10 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
     if (!cipher_ctx->init)
         return dissect_ss_salt(tvb, pinfo, ss_tree, NULL);
     else
-        return dissect_ss_encrypted_data(tvb, pinfo, ss_tree, NULL);
+        return dissect_ss_encrypted_data(tvb, pinfo, tree, ss_tree, NULL);
 }
 
-int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree * tree, proto_tree *ss_tree, void *data _U_)
 {
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
@@ -533,7 +533,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
     add_new_data_source(pinfo, decrypted_tvb, "Decrypted Shadowsocks Data");
     if (msg->type == SS_RELAY_HEADER)
     {
-        dissector_ret = dissect_ss_relay_header(decrypted_tvb, pinfo, tree, NULL);
+        dissector_ret = dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, NULL);
         if (dissector_ret == -1)
         {
             ws_critical("[%u] %s: Failed to dissect relay header", pinfo->num, __func__);
@@ -543,7 +543,7 @@ int dissect_ss_encrypted_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tre
         conv_data->relay_header_dissection_done = true;
     }
     else if (msg->type == SS_STREAM_DATA)
-        dissector_ret = dissect_ss_stream_data(decrypted_tvb, pinfo, tree, NULL);
+        dissector_ret = dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, NULL);
 
     return tvb_captured_length(tvb);
 }
@@ -699,7 +699,7 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     return tvb_captured_length(tvb);
 }
 
-int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree * tree, proto_tree *ss_tree, void *data _U_)
 {
     proto_item *stream_data_ti;
     proto_tree *stream_data_tree;
@@ -710,7 +710,7 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, 
 
     /*** Column Info & Protocol Tree ***/
     col_append_str(pinfo->cinfo, COL_INFO, "[Stream Data]");
-    stream_data_ti = proto_tree_add_item(tree, hf_stream_data_node, tvb, 0, -1, ENC_NA);
+    stream_data_ti = proto_tree_add_item(ss_tree, hf_stream_data_node, tvb, 0, -1, ENC_NA);
     stream_data_tree = proto_item_add_subtree(stream_data_ti, ett_ss);
 
     /*** Conversation ***/
@@ -735,7 +735,7 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, 
     if (!is_complete_tls) {
         reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
                                                         tvb_captured_length_remaining(tvb, 0),
-                                                        stream_data_tree, proto_tree_get_parent_tree(tree),
+                                                        ss_tree, proto_tree_get_parent_tree(ss_tree), 
                                                         proto_ss_streaming_reassembly_table,
                                                         conv_data->reassembly_info,
                                                         get_virtual_frame_num64(tvb, pinfo, 0),

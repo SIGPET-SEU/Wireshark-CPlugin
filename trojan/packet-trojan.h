@@ -22,9 +22,12 @@ bool is_trojan_request(tvbuff_t* tvb);
 bool is_trojan_response(tvbuff_t* tvb);
 
 /****************Trojan Utils Function End******************/
-
-#define TROJAN_TLS_PORT 49637
-#define TROJAN_TLS_RANGE_PORT "49637,56306"
+/**
+ * Change single port to port range, the usage is mentioned in packet-xml.c.
+ * Although packet-http.c also records the usage, it seems to be quite complicated.
+ */
+//#define TROJAN_TLS_PORT 49637
+#define TROJAN_TLS_RANGE_PORT "49637,56306,52002"
 #define TROJAN_REQUEST_MAX_LENGTH 150 // Trojan 最大请求长度，非官方，
 #define TROJAN_PASSWORD_LENGTH 56
 #define TROJAN_CRLF_LENGTH 2

@@ -186,12 +186,12 @@ proto_reg_handoff_trojan(void)
     tls_handle = find_dissector("tls");
     h2_handle = find_dissector("http2");
     http_tls_handle = find_dissector("http-over-tls");
-    dissector_add_uint("tls.port", TROJAN_TLS_PORT, trojan_handle);
+    //dissector_add_uint("tls.port", TROJAN_TLS_PORT, trojan_handle);
     //dissector_add_string("tls.alpn", "http/1.1", trojan_handle);
     //dissector_add_string("tls.alpn", "h2", trojan_handle);
     //dissector_add_string("http.upgrade", "h2", trojan_handle);
     //dissector_add_string("http.upgrade", "h2c", trojan_handle);
-    //dissector_add_uint_range_with_preference("tls.port", TROJAN_TLS_RANGE_PORT, trojan_handle);
+    dissector_add_uint_range_with_preference("tls.port", TROJAN_TLS_RANGE_PORT, trojan_handle);
     // dissector_add_for_decode_as("trojan", trojan_handle); // ui
 
     /* 将 trojan 注册到 tls 的启发式解析器中 */

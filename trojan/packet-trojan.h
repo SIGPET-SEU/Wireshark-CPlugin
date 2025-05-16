@@ -1,3 +1,5 @@
+
+#include <epan/reassemble.h>
 /****************Trojan Register*********************/
 
 void proto_register_trojan(void); // 1. 注册 Trojan 协议
@@ -75,7 +77,9 @@ static gint ett_trojan;
 
 /****************Trojan ETT Fields End******************/
 
+static reassembly_table proto_trojan_streaming_reassembly_table;
 /** information about a request and response on a VMess conversation. */
 typedef struct trojan_conv_data_t {
     port_type save_port_type;
+    streaming_reassembly_info_t* reassembly_info;
 } trojan_conv_data;

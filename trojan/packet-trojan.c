@@ -10,11 +10,16 @@
 
 #include "packet-trojan.h"
 
+// heads for displaying reassembly information
+REASSEMBLE_ITEMS_DEFINE(msg, "Trojan Message");
+
+bool proto_desegment = true;
+
 static int
 dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     proto_item* ti;
     proto_tree* trojan_tree;
-    tvbuff_t* next_tvb;
+    //tvbuff_t* next_tvb;
     port_type save_port_type;
     uint16_t save_can_desegment;
     int ret;
@@ -41,6 +46,7 @@ dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
     if (!conv_data) {
         conv_data = wmem_new0(wmem_file_scope(), trojan_conv_data);
         conv_data->save_port_type = save_port_type;
+        conv_data->reassembly_info = streaming_reassembly_info_new();
         conversation_add_proto_data(conversation, proto_trojan, conv_data);
     }
 
@@ -50,14 +56,18 @@ dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
     trojan_tree = proto_item_add_subtree(ti, ett_trojan);
     proto_tree_add_item(trojan_tree, hf_trojan_tunnel_data, tvb, 0, tvb_reported_length(tvb), ENC_BIG_ENDIAN);
 
-    next_tvb = tvb_new_subset_remaining(tvb, 0);
+    //next_tvb = tvb_new_subset_remaining(tvb, 0);
 
     dissector_add_string("tls.alpn", "h2", h2_handle);
     //dissector_add_string("tls.alpn", "http/1.1", http_tls_handle);
     //dissector_add_string("http.upgrade", "h2", h2_handle);
     //dissector_add_string("http.upgrade", "h2c", h2_handle);
 
-    ret = call_dissector_with_data(tls_handle, next_tvb, pinfo, tree, data);
+    ret = call_dissector_only(tls_handle, tvb, pinfo, trojan_tree, data);
+    //reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
+    //    trojan_tree, proto_tree_get_parent_tree(trojan_tree), proto_trojan_streaming_reassembly_table,
+    //    conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
+    //    proto_tree_get_parent_tree(tree), NULL, "Trojan", &msg_fragment_items, hf_msg_segment);
 
     dissector_delete_string("tls.alpn", "h2", h2_handle);
     //dissector_delete_string("tls.alpn", "http/1.1", http_tls_handle);
@@ -126,11 +136,86 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
         return dissect_trojan_request(tvb, pinfo, tree, data);
     }
 
-    /* trojan response(tunnel data) packet */
-    if (is_trojan_response(tvb)) {
-        //*(tlsinfo->app_handle) = trojan_handle;
-        return dissect_trojan_response(tvb, pinfo, tree, data);
+    guint offset = 0;
+    guint offset_before;
+    unsigned length;
+    tvbuff_t* next_tvb;
+
+    while (tvb_reported_length_remaining(tvb, offset)) {
+        const guchar* raw_buf = tvb_get_ptr(tvb, offset, 5);
+        guint plen = ((guint)raw_buf[3] << 8) + (guint)(raw_buf[4]) + 5;
+        unsigned captured_length_remaining;
+        //pinfo->desegment_offset = offset;
+        //pinfo->desegment_len = plen;
+
+        captured_length_remaining = tvb_ensure_captured_length_remaining(tvb, offset);
+
+        if (!pinfo->fd->visited) {
+            unsigned remaining_bytes;
+            remaining_bytes = tvb_reported_length_remaining(tvb, offset);
+            if (plen > remaining_bytes) {
+                pinfo->want_pdu_tracking = 2;
+                pinfo->bytes_until_next_pdu = plen - remaining_bytes;
+            }
+        }
+
+        /*
+          * Can we do reassembly?
+          */
+        if (proto_desegment && pinfo->can_desegment) {
+            /*
+             * Yes - is the PDU split across segment boundaries?
+             */
+            if (captured_length_remaining < plen) {
+                /*
+                 * Yes.  Tell the TCP dissector where the data for this message
+                 * starts in the data it handed us, and how many more bytes we
+                 * need, and return.
+                 */
+                pinfo->desegment_offset = offset;
+                pinfo->desegment_len = plen - captured_length_remaining;
+                return 0;
+            }
+        }
+
+        /*
+         * Construct a tvbuff containing the amount of the payload we have
+         * available.  Make its reported length the amount of data in the PDU.
+         */
+        length = captured_length_remaining;
+        if (length > plen)
+            length = plen;
+        next_tvb = tvb_new_subset_length_caplen(tvb, offset, length, plen);
+        if (!(proto_desegment && pinfo->can_desegment)) {
+            if (plen > length) {
+                /* If we can't do reassembly but the PDU is split across
+                 * segment boundaries, mark the tvbuff as a fragment so
+                 * we throw FragmentBoundsError instead of malformed
+                 * errors.
+                 */
+                tvb_set_fragment(next_tvb);
+            }
+        }
+
+        dissect_trojan_response(next_tvb, pinfo, tree, data);
+
+        /*
+         * Step to the next PDU.
+         * Make sure we don't overflow.
+         */
+        offset_before = offset;
+        offset += plen;
+        if (offset <= offset_before)
+            return 0;
     }
+
+    return 0;
+
+    ///* trojan response(tunnel data) packet */
+    //if (is_trojan_response(tvb)) {
+    //    //*(tlsinfo->app_handle) = trojan_handle;
+    //    return dissect_trojan_response(tvb, pinfo, tree, data);
+    //}
 
     /* not trojan packet */
     //*(tlsinfo->app_handle) = save_handle;
@@ -253,7 +338,47 @@ proto_register_trojan(void)
             FT_BYTES, BASE_NONE,
             NULL, 0x0,
             NULL, HFILL }
-        }
+        },
+        // Trojan Fragment
+         { &hf_msg_fragments,
+             {"Reassembled VMess Segments", "vmess.fragments",
+             FT_NONE, BASE_NONE, NULL, 0x00, NULL, HFILL }
+         },
+         { &hf_msg_fragment,
+             {"Message fragment", "vmess.fragment",
+             FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_fragment_overlap,
+             {"Message fragment overlap", "vmess.fragment.overlap",
+             FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_fragment_overlap_conflicts,
+             {"Message fragment overlapping with conflicting data",
+             "vmess.fragment.overlap.conflicts",
+             FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_fragment_multiple_tails,
+             {"Message has multiple tail fragments",
+             "vmess.fragment.multiple_tails",
+             FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_fragment_too_long_fragment,
+             {"Message fragment too long", "vmess.fragment.too_long_fragment",
+             FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_fragment_error,
+             {"Message defragmentation error", "vmess.fragment.error",
+             FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_fragment_count,
+             {"Message fragment count", "vmess.fragment.count",
+             FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_reassembled_in,
+             {"Reassembled in", "vmess.reassembled_in",
+             FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_reassembled_length,
+             {"Reassembled length", "vmess.reassembled.length",
+             FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
+         { &hf_msg_reassembled_data,
+             {"Reassembled data",  "vmess.reassembled.data",
+             FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL} },
+         { &hf_msg_segment,
+             {"VMess segment", "vmess.segment_data",
+             FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL } },
 
     };
 
@@ -270,6 +395,9 @@ proto_register_trojan(void)
 
     proto_register_field_array(proto_trojan, hf, array_length(hf));
     proto_register_subtree_array(ett, array_length(ett));
+
+    reassembly_table_register(&proto_trojan_streaming_reassembly_table,
+        &addresses_ports_reassembly_table_functions);
 
     trojan_handle = register_dissector("trojan", dissect_trojan, proto_trojan);
 }

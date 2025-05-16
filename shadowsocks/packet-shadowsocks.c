@@ -722,9 +722,10 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree * tree,
 
     /* Try heuristic dissector on short, Out-of-Order (?) SS segments */
     gboolean is_complete_tls = FALSE;
-    /* COMMENT: Shall we check if the tvb size is larger than 3? */
-    const gchar* plaintext = tvb_get_ptr(tvb, 0, 3);
+    /* COMMENT: Shall we check if the tvb size is larger than 5? */
+    const guchar* plaintext = tvb_get_ptr(tvb, 0, 5);
     guint plaintext_len = tvb_captured_length_remaining(tvb, 0);
+    // COMMENT: Shall we compare all possible TLS handshake types?
     if (memcmp(plaintext, "\x17\x03\x03", 3) == 0) { // Such segments should "look like" TLS packets
         guint possible_tls_len = ((guint)plaintext[3] << 8) + (guint)(plaintext[4]);
         if (plaintext_len == possible_tls_len + 5) {

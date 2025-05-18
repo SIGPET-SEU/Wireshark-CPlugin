@@ -284,7 +284,7 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
                 return 0;
         }
 
-        return 0;
+        return tvb_captured_length(tvb);
     }
     //else {
     //    call_dissector_only(http_handle, tvb, pinfo, tree, data);
@@ -385,17 +385,16 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
             return 0;
     }
 
-    return 0;
+    return tvb_captured_length(tvb);
     
 
 unknown:
     /* Not an HTTP frame, currently we simply call data dissector to handle this */
 
     printf("[Warning]: Cannot be parsed by trojan dissect, call data dissector\n");
-    return 0;
 
     // return call_dissector_with_data(http_handle, tvb, pinfo, tree, data); // 
-    //return call_data_dissector(tvb, pinfo, tree);
+    return call_data_dissector(tvb, pinfo, tree);
 }
 
 static bool

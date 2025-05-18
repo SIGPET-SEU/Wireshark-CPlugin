@@ -451,6 +451,7 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
 
     /* Try heuristic dissector on short, Out-of-Order (?) VMess segments */
     gboolean is_complete_tls = FALSE;
+    // COMMENT: Shall we compare all possible TLS handshake types?
     if (memcmp(plaintext, "\x17\x03\x03", 3) == 0) { // Such segments should "look like" TLS packets
         guint possible_tls_len = ((guint)plaintext[3] << 8) + (guint)(plaintext[4]);
         if (plaintext_len == possible_tls_len + 5) {
@@ -460,10 +461,20 @@ dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo,
     }
 
     if (!is_complete_tls) {
-        reassemble_streaming_data_and_call_subdissector(packet_tvb, pinfo, 0, tvb_reported_length_remaining(packet_tvb, 0),
-            vmess_tree, proto_tree_get_parent_tree(vmess_tree), proto_vmess_streaming_reassembly_table,
-            conv_data->reassembly_info, get_virtual_frame_num64(packet_tvb, pinfo, 0), tls_handle,
-            proto_tree_get_parent_tree(tree), NULL, "VMess", &msg_fragment_items, hf_msg_segment);
+        /* Use plaintext[0] to construct cur_frame_num to avoid duplications */
+        reassemble_streaming_data_and_call_subdissector(packet_tvb, pinfo, 0,
+                                                        tvb_reported_length_remaining(packet_tvb, 0),
+                                                        vmess_tree,
+                                                        proto_tree_get_parent_tree(vmess_tree),
+                                                        proto_vmess_streaming_reassembly_table,
+                                                        conv_data->reassembly_info,
+                                                        get_virtual_frame_num64(packet_tvb, pinfo, (gint)plaintext[0]),
+                                                        tls_handle,
+                                                        proto_tree_get_parent_tree(tree),
+                                                        NULL,
+                                                        "VMess",
+                                                        &msg_fragment_items,
+                                                        hf_msg_segment);
     }
 
     pinfo->ptype = save_port_type;

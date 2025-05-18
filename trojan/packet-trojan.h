@@ -26,7 +26,7 @@ bool is_trojan_response(tvbuff_t* tvb);
 /****************Trojan Utils Function End******************/
 
 #define TROJAN_TLS_PORT 49637
-#define TROJAN_TLS_RANGE_PORT "49637,56306"
+#define TROJAN_TLS_RANGE_PORT "49637,56306,52002"
 #define TROJAN_REQUEST_MAX_LENGTH 150 // Trojan 最大请求长度，非官方，
 #define TROJAN_PASSWORD_LENGTH 56
 #define TROJAN_CRLF_LENGTH 2
@@ -38,6 +38,7 @@ static int proto_trojan;
 
 static dissector_handle_t trojan_handle;
 static dissector_handle_t tls_handle;
+static dissector_handle_t http_handle;
 static dissector_handle_t h2_handle;
 static dissector_handle_t http_tls_handle;
 static heur_dissector_list_t tls_heur_subdissector_list;

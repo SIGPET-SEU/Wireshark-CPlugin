@@ -341,7 +341,7 @@ int dissect_vmess_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U
 
     vmess_message_info_t* msg = get_vmess_message(pinfo, tvb_raw_offset(tvb));
 
-    proto_tree_add_uint(vmess_tree, hf_vmess_request_len, tvb, 0, 0, msg->data_len);
+    proto_item_set_generated(proto_tree_add_uint(vmess_tree, hf_vmess_request_len, tvb, 0, 0, msg->data_len));
     dissect_decrypted_vmess_request(tvb, pinfo, vmess_tree, msg);
 
     return 0;

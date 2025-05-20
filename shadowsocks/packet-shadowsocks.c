@@ -422,7 +422,7 @@ int dissect_ss_message(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
             dissect_ss_relay_header(decrypted_tvb, pinfo, ss_tree, NULL);
             break;
         case SS_STREAM_DATA:
-            proto_tree_add_uint(ss_tree, hf_payload_len, tvb, 0, 0, msg->plain_len);
+            proto_item_set_generated(proto_tree_add_uint(ss_tree, hf_payload_len, tvb, 0, 0, msg->plain_len));
             dissect_ss_stream_data(decrypted_tvb, pinfo, tree, ss_tree, NULL);
             break;
         default:

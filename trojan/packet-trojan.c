@@ -21,6 +21,12 @@ typedef struct {
     int		special;
 } http_header_info;
 
+static const value_string data_type[] = {
+        { TROJAN_TLS, "TLS" },
+        { TROJAN_HTTP, "HTTP" },
+        { TROJAN_UNKNOWN, NULL },
+};
+
 
 #define HDR_NO_SPECIAL			0
 #define HDR_AUTHORIZATION		1
@@ -79,8 +85,217 @@ static const http_header_info headers[] = {
         { "Expires", HDR_NO_SPECIAL },
 };
 
+static unsigned
+tls_record_length(tvbuff_t* tvb, int offset) {
+    const guchar* raw_buf = tvb_get_ptr(tvb, offset, 5);
+    guint plen = ((guint)raw_buf[3] << 8) + (guint)(raw_buf[4]) + 5;
+}
+
+
+/**
+ * Passing the line and check if the line belongs to HTTP Request/Response.
+ *
+ * Currently, only HTTP/1.1 is supported.
+ */
+static bool
+is_http_request_or_response(const char* line, int linelen) {
+    /* Check HTTP/1.1 Response */
+    if (linelen >= 8 && strncmp(line, "HTTP/1.1", 8) == 0) {
+        /* We restrict to HTTP/1.1 only now */
+        return true;
+    }
+
+
+    /* Decide whether the tvb is HTTP/1.1 Request/Response or unknown protocol */
+    /* Check HTTP/1.1 Request */
+    int indx = 0;
+    /* Basic check if this is HTTP/1.1, OSCP seems to use HTTP/1.1 more, so currently we only consider OSCP over HTTP/1.1 */
+    while (indx < linelen) {
+        if (line[indx] == ' ')
+            break;
+        else
+            indx++;
+    }
+    switch (indx) {
+        /**
+         * OCSP only use HTTP GET/POST method in request, here we use the following codes in respect with
+         * packet-http.c is_http_request_or_reply function
+         *
+         */
+    case 3:
+        if (strncmp(line, "GET", indx) == 0) {
+            return true;
+        }
+    case 4:
+        if (strncmp(line, "POST", indx) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/*
+* Decide the upper layer of Trojan using the preface with enough preface_len. The caller
+* is responsible to pass enough data to compute the data type.
+*/
 static int
-dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+trojan_data_type(tvbuff_t* tvb, int offset) {
+    if (tvb_reported_length_remaining(tvb, offset) < 8)
+        return TROJAN_ONE_MORE_SEGMENT;  /* Require more data to decide data type*/
+
+    /* Check if the tvb is actually a TLS record */
+    const char* needle = tvb_get_ptr(tvb, offset, 8);
+    for (guint i = 0; i < TLS_SIGNUM; i++)
+        if (memcmp(needle, TLS_signature[i], 3) == 0)
+            return TROJAN_TLS;
+
+    if (is_http_request_or_response(needle, 8))
+        return TROJAN_HTTP;
+
+    return TROJAN_UNKNOWN;
+}
+
+/* /* Find the index of HTTP header field index defined in headers */
+static int
+find_header_hf_value(char* line, int linelen, unsigned header_len)
+{
+    unsigned i;
+
+    if (linelen < header_len)
+        return -1;
+
+    for (i = 0; i < array_length(headers); i++) {
+        if (header_len == strlen(headers[i].name) &&
+            memcmp(line, headers[i].name, header_len) == 0)
+            return i;
+    }
+
+    return -1;
+}
+
+/* For OCSP connection, get the length of underlying HTTP frame length, such that we could pass the
+* correct tvb to the HTTP handle. Currently, only HTTP/1.1 is supported.
+*
+* Moreover, we now assume that the (possible imcomplete) tvb contains Content-Length field, such
+* that we could decide the length of reassembly.
+*
+* TODO: What if the first tvb does not contain Content-Length?
+*/
+static unsigned
+http_frame_length(tvbuff_t* tvb, int offset) {
+    /* Here we need to do basic HTTP/1.1 reassembly for OCSP protocol dissection */
+        /* Search for Content-Length in the tvb, iterate through lines in the obtained buffer */
+    int linelen, next_offset;
+    guint content_length = 0;
+    const unsigned char* line;
+    const unsigned char* lineend;
+    int colon_offset;
+    bool is_request_or_response = false;
+
+    /* Fetch the first line */
+    linelen = tvb_find_line_end(tvb, offset,
+        tvb_ensure_captured_length_remaining(tvb, offset), &next_offset,
+        false);
+
+
+
+    /*
+     * Get a buffer that refers to the line.
+     *
+     * Note that "tvb_find_line_end()" will return a value that
+     * is not longer than what's in the buffer, so the
+     * "tvb_get_ptr()" call won't throw an exception.
+     */
+    line = tvb_get_ptr(tvb, offset, linelen);
+    //is_request_or_response = is_http_request_or_response(line, linelen);
+
+    offset = next_offset; /* Start from the line right after the first line */
+    while (tvb_offset_exists(tvb, offset)) {
+        int value_offset;
+        unsigned char c;
+        int header_len;
+        int hf_index;
+        int value_bytes_len;
+        char* value_bytes;
+        char* linep;
+
+
+        linelen = tvb_find_line_end(tvb, offset,
+            tvb_ensure_captured_length_remaining(tvb, offset), &next_offset,
+            false);
+
+        if (linelen < 0)
+            break;
+
+        if (linelen == 0)
+            /* The scanner has reached the end of HTTP/1.1 header, plus Content-Length, and the last /r/n in the header */
+            return (guint)next_offset + content_length;
+
+        if (linelen == tvb_reported_length_remaining(tvb, offset)) {
+            /* It seems that the line splits over several segments, we require ONE MORE SEGMENTS to handle this */
+            return DESEGMENT_ONE_MORE_SEGMENT;
+        }
+
+        line = tvb_get_ptr(tvb, offset, linelen);
+        lineend = line + linelen;
+
+        /* Search for colon in the line */
+        linep = (const unsigned char*)memchr(line, ':', linelen);
+        colon_offset = linep - line;
+        /*
+            * Skip whitespace after the colon.
+            */
+        value_offset = colon_offset + 1;
+        while (value_offset < linelen
+            && ((c = line[value_offset]) == ' ' || c == '\t'))
+            value_offset++;
+
+        header_len = colon_offset;
+        hf_index = find_header_hf_value(line, linelen, header_len);
+
+        value_bytes_len = linelen - value_offset;
+        value_bytes = (char*)malloc(value_bytes_len + 1);
+        if (!value_bytes) {
+            ws_critical("Failed to allocate space, dissection impossible");
+            return 0;
+        }
+
+        memcpy(value_bytes, line + value_offset, value_bytes_len);
+        value_bytes[value_bytes_len] = '\0';
+        if (hf_index == -1) {
+            return 0; /* Malformed tvb ? */
+        }
+        /* Get the value of content length */
+        switch (headers[hf_index].special) {
+        case HDR_CONTENT_LENGTH:
+            content_length = g_ascii_strtoll(value_bytes, NULL, 10);
+            break;
+        default:
+            break;  /* We only handle Content-Length case*/
+        }
+
+        free(value_bytes);
+        offset = next_offset;
+    }
+
+    return 0;
+}
+
+
+static int
+dissect_trojan_http(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+    proto_item* ti;
+    proto_tree* trojan_tree;
+    ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, -1, ENC_NA);
+    trojan_tree = proto_item_add_subtree(ti, ett_trojan);
+    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_HTTP));
+    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
+    return call_dissector_only(http_handle, tvb, pinfo, tree, data);
+}
+
+static int
+dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
     proto_item* ti;
     proto_tree* trojan_tree;
     //tvbuff_t* next_tvb;
@@ -119,6 +334,8 @@ dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_,
     ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, -1, ENC_NA);
     trojan_tree = proto_item_add_subtree(ti, ett_trojan);
     proto_tree_add_item(trojan_tree, hf_trojan_tunnel_data, tvb, 0, tvb_reported_length(tvb), ENC_BIG_ENDIAN);
+    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_TLS));
+    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
 
     //next_tvb = tvb_new_subset_remaining(tvb, 0);
 
@@ -185,15 +402,13 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
     return tvb_captured_length(tvb);
 }
 
+/*
+* TODO: Consider use function pointer to remove redundant codes.
+* 1. plen fetcher
+* 2. dissection routine
+*/
 static int
 dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-
-    //struct tlsinfo* tlsinfo = (struct tlsinfo*)data;
-    //dissector_handle_t save_handle = *(tlsinfo->app_handle);
-
-    /*printf("dissect_trojan  pinfo->Frame number: %d, 4bytes: %s\n",
-        pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STRING));*/
-
     /* trojan request packet */
     if (is_trojan_request(tvb)) {
         //*(tlsinfo->app_handle) = trojan_handle;
@@ -205,115 +420,112 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
     unsigned length;
     tvbuff_t* next_tvb;
 
+    guint plen;
+    TrojanRecordType type = trojan_data_type(tvb, 0);
+
+    unsigned (*get_pdu_len)(tvbuff_t*, int);
+    dissector_t dissect_pdu;
+
+    switch (type) {
+    case TROJAN_HTTP:
+        get_pdu_len = http_frame_length;
+        dissect_pdu = dissect_trojan_http;
+        break;
+    case TROJAN_TLS:
+        get_pdu_len = tls_record_length;
+        dissect_pdu = dissect_trojan_tls;
+        break;
+    default:
+        goto unknown;
+    }
+
+
     /* Check if the tvb is actually a TLS record */
-    const guchar* needle = tvb_get_ptr(tvb, offset, 3);
-    bool is_tls = false;
-    for (guint i = 0; i < TLS_SIGNUM; i++) {
-        if (memcmp(needle, TLS_signature[i], 3) == 0) {
-            is_tls = true;
-            break;
-        }
-    }
-
-    if (is_tls) {
-        while (tvb_reported_length_remaining(tvb, offset) > 0) {
-            const guchar* raw_buf = tvb_get_ptr(tvb, offset, 5);
-            guint plen = ((guint)raw_buf[3] << 8) + (guint)(raw_buf[4]) + 5;
-            unsigned captured_length_remaining;
-            //pinfo->desegment_offset = offset;
-            //pinfo->desegment_len = plen;
-
-            captured_length_remaining = tvb_ensure_captured_length_remaining(tvb, offset);
-
-            if (!pinfo->fd->visited) {
-                unsigned remaining_bytes;
-                remaining_bytes = tvb_reported_length_remaining(tvb, offset);
-                if (plen > remaining_bytes) {
-                    pinfo->want_pdu_tracking = 2;
-                    pinfo->bytes_until_next_pdu = plen - remaining_bytes;
-                }
-            }
-
-            /*
-              * Can we do reassembly?
-              */
-            if (proto_desegment && pinfo->can_desegment) {
-                /*
-                 * Yes - is the PDU split across segment boundaries?
-                 */
-                if (captured_length_remaining < plen) {
-                    /*
-                     * Yes.  Tell the TCP dissector where the data for this message
-                     * starts in the data it handed us, and how many more bytes we
-                     * need, and return.
-                     */
-                    pinfo->desegment_offset = offset;
-                    pinfo->desegment_len = plen - captured_length_remaining;
-                    return 0;
-                }
-            }
-
-            /*
-             * Construct a tvbuff containing the amount of the payload we have
-             * available.  Make its reported length the amount of data in the PDU.
-             */
-            length = captured_length_remaining;
-            if (length > plen)
-                length = plen;
-            next_tvb = tvb_new_subset_length_caplen(tvb, offset, length, plen);
-            if (!(proto_desegment && pinfo->can_desegment)) {
-                if (plen > length) {
-                    /* If we can't do reassembly but the PDU is split across
-                     * segment boundaries, mark the tvbuff as a fragment so
-                     * we throw FragmentBoundsError instead of malformed
-                     * errors.
-                     */
-                    tvb_set_fragment(next_tvb);
-                }
-            }
-
-            dissect_trojan_response(next_tvb, pinfo, tree, data);
-
-            /*
-             * Step to the next PDU.
-             * Make sure we don't overflow.
-             */
-            offset_before = offset;
-            offset += plen;
-            if (offset <= offset_before)
-                return 0;
-        }
-
-        return tvb_captured_length(tvb);
-    }
-    //else {
-    //    call_dissector_only(http_handle, tvb, pinfo, tree, data);
-    //    return 0;
-    //}
-    
-
-    ///* trojan response(tunnel data) packet */
-    //if (is_trojan_response(tvb)) {
-    //    //*(tlsinfo->app_handle) = trojan_handle;
-    //    return dissect_trojan_response(tvb, pinfo, tree, data);
+    //const guchar* needle = tvb_get_ptr(tvb, offset, 3);
+    //bool is_tls = false;
+    //for (guint i = 0; i < TLS_SIGNUM; i++) {
+    //    if (memcmp(needle, TLS_signature[i], 3) == 0) {
+    //        is_tls = true;
+    //        break;
+    //    }
     //}
 
-    /* not trojan packet */
-    //*(tlsinfo->app_handle) = save_handle;
+    //if (is_tls) {
+    //    while (tvb_reported_length_remaining(tvb, offset) > 0) {
+    //        const guchar* raw_buf = tvb_get_ptr(tvb, offset, 5);
+    //        guint plen = ((guint)raw_buf[3] << 8) + (guint)(raw_buf[4]) + 5;
+    //        unsigned captured_length_remaining;
+    //        //pinfo->desegment_offset = offset;
+    //        //pinfo->desegment_len = plen;
 
+    //        captured_length_remaining = tvb_ensure_captured_length_remaining(tvb, offset);
 
-    // 尝试其他常见协议
-    // printf(dissector_handle_get_dissector_name(*(tlsinfo->app_handle)));
-    //if (dissector_try_heuristic(tls_heur_subdissector_list, tvb, pinfo, tree, &heur_dtbl_entry, data)) {
-    //    // 打印被成功调用的启发器的名字
-    //    printf("Successful heuristic dissector: %s\n", heur_dtbl_entry->short_name);
+    //        if (!pinfo->fd->visited) {
+    //            unsigned remaining_bytes;
+    //            remaining_bytes = tvb_reported_length_remaining(tvb, offset);
+    //            if (plen > remaining_bytes) {
+    //                pinfo->want_pdu_tracking = 2;
+    //                pinfo->bytes_until_next_pdu = plen - remaining_bytes;
+    //            }
+    //        }
+
+    //        /*
+    //          * Can we do reassembly?
+    //          */
+    //        if (proto_desegment && pinfo->can_desegment) {
+    //            /*
+    //             * Yes - is the PDU split across segment boundaries?
+    //             */
+    //            if (captured_length_remaining < plen) {
+    //                /*
+    //                 * Yes.  Tell the TCP dissector where the data for this message
+    //                 * starts in the data it handed us, and how many more bytes we
+    //                 * need, and return.
+    //                 */
+    //                pinfo->desegment_offset = offset;
+    //                pinfo->desegment_len = plen - captured_length_remaining;
+    //                return 0;
+    //            }
+    //        }
+
+    //        /*
+    //         * Construct a tvbuff containing the amount of the payload we have
+    //         * available.  Make its reported length the amount of data in the PDU.
+    //         */
+    //        length = captured_length_remaining;
+    //        if (length > plen)
+    //            length = plen;
+    //        next_tvb = tvb_new_subset_length_caplen(tvb, offset, length, plen);
+    //        if (!(proto_desegment && pinfo->can_desegment)) {
+    //            if (plen > length) {
+    //                /* If we can't do reassembly but the PDU is split across
+    //                 * segment boundaries, mark the tvbuff as a fragment so
+    //                 * we throw FragmentBoundsError instead of malformed
+    //                 * errors.
+    //                 */
+    //                tvb_set_fragment(next_tvb);
+    //            }
+    //        }
+
+    //        dissect_trojan_tls(next_tvb, pinfo, tree, data);
+
+    //        /*
+    //         * Step to the next PDU.
+    //         * Make sure we don't overflow.
+    //         */
+    //        offset_before = offset;
+    //        offset += plen;
+    //        if (offset <= offset_before)
+    //            return 0;
+    //    }
+
     //    return tvb_captured_length(tvb);
     //}
+ 
     /* Try to handle HTTP/1.1 */
     while (tvb_reported_length_remaining(tvb, offset) > 0) {
-        int plen = http_frame_length(tvb, offset);
         unsigned captured_length_remaining;
-        if (plen == -2) {
+        if (type == TROJAN_ONE_MORE_SEGMENT) {
             if (proto_desegment && pinfo->can_desegment) {
                 /* One more piece of tvb is required to get the reassemble length */
                 pinfo->desegment_offset = offset;
@@ -321,7 +533,8 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
                 return 0;
             }
         }
-        if (plen == -1)
+        plen = (*get_pdu_len)(tvb, offset);
+        if (plen == 0)
             goto unknown;
 
         captured_length_remaining = tvb_ensure_captured_length_remaining(tvb, offset);
@@ -373,7 +586,7 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
             }
         }
 
-        call_dissector_only(http_handle, next_tvb, pinfo, tree, data);
+        (*dissect_pdu)(next_tvb, pinfo, tree, data);
 
         /*
          * Step to the next PDU.
@@ -495,6 +708,18 @@ proto_register_trojan(void)
         { &hf_trojan_tunnel_data,
             { "Trojan Tunnel Data", "trojan.tunnel_data",
             FT_BYTES, BASE_NONE,
+            NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_trojan_data_type,
+            { "Trojan Data Type", "trojan.data_type",
+            FT_UINT8, BASE_DEC,
+            VALS(data_type), 0x0,
+            NULL, HFILL }
+        },
+        { &hf_trojan_data_length,
+            { "Trojan Data Length", "trojan.data_length",
+            FT_UINT16, BASE_DEC,
             NULL, 0x0,
             NULL, HFILL }
         },
@@ -671,176 +896,4 @@ is_trojan_request(tvbuff_t* tvb) {
 bool
 is_trojan_response(tvbuff_t* tvb) {
     return tvb_find_TLS_signature(tvb) == 0 ? true : false;
-}
-
-/**
- * Passing the line and check if the line belongs to HTTP Request/Response.
- *
- * Currently, only HTTP/1.1 is supported.
- */
-static bool
-is_http_request_or_response(const char* line, int linelen) {
-    /* Check HTTP/1.1 Response */
-    if (linelen >= 8 && strncmp(line, "HTTP/1.1", 8) == 0) {
-        /* We restrict to HTTP/1.1 only now */
-        return true;
-    }
-
-
-    /* Decide whether the tvb is HTTP/1.1 Request/Response or unknown protocol */
-    /* Check HTTP/1.1 Request */
-    int indx = 0;
-    /* Basic check if this is HTTP/1.1, OSCP seems to use HTTP/1.1 more, so currently we only consider OSCP over HTTP/1.1 */
-    while (indx < linelen) {
-        if (line[indx] == ' ')
-            break;
-        else
-            indx++;
-    }
-    switch (indx) {
-        /**
-         * OCSP only use HTTP GET/POST method in request, here we use the following codes in respect with
-         * packet-http.c is_http_request_or_reply function
-         *
-         */
-    case 3:
-        if (strncmp(line, "GET", indx) == 0) {
-            return true;
-        }
-    case 4:
-        if (strncmp(line, "POST", indx) == 0) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/* /* Find the index of HTTP header field index defined in headers */
-static int
-find_header_hf_value(char* line, int linelen, unsigned header_len)
-{
-    unsigned i;
-
-    if (linelen < header_len)
-        return -1;
-
-    for (i = 0; i < array_length(headers); i++) {
-        if (header_len == strlen(headers[i].name) &&
-            memcmp(line, headers[i].name, header_len) == 0)
-            return i;
-    }
-
-    return -1;
-}
-
-/* For OCSP connection, get the length of underlying HTTP frame length, such that we could pass the
-* correct tvb to the HTTP handle. Currently, only HTTP/1.1 is supported.
-* 
-* Moreover, we now assume that the (possible imcomplete) tvb contains Content-Length field, such
-* that we could decide the length of reassembly.
-* 
-* TODO: What if the first tvb does not contain Content-Length?
-*/
-static int 
-http_frame_length(tvbuff_t* tvb, int offset) {
-    /* Here we need to do basic HTTP/1.1 reassembly for OCSP protocol dissection */
-        /* Search for Content-Length in the tvb, iterate through lines in the obtained buffer */
-    int linelen, next_offset;
-    int content_length = 0;
-    const unsigned char* line;
-    const unsigned char* lineend;
-    int colon_offset;
-    bool is_request_or_response = false;
-
-    /* Fetch the first line of the tvb to see if it is an HTTP/1.1 header */
-    linelen = tvb_find_line_end(tvb, offset,
-        tvb_ensure_captured_length_remaining(tvb, offset), &next_offset,
-        false);
-
-    if (linelen < 0)
-        return -1;
-
-    /*
-     * Get a buffer that refers to the line.
-     *
-     * Note that "tvb_find_line_end()" will return a value that
-     * is not longer than what's in the buffer, so the
-     * "tvb_get_ptr()" call won't throw an exception.
-     */
-    line = tvb_get_ptr(tvb, offset, linelen);
-    is_request_or_response = is_http_request_or_response(line, linelen);
-    
-    if (is_request_or_response) {
-        offset = next_offset; /* Start from the line right after the first line */
-        while (tvb_offset_exists(tvb, offset)) {
-            int value_offset;
-            unsigned char c;
-            int header_len;
-            int hf_index;
-            int value_bytes_len;
-            char* value_bytes;
-            char* linep;
-            
-
-            linelen = tvb_find_line_end(tvb, offset,
-                tvb_ensure_captured_length_remaining(tvb, offset), &next_offset,
-                false);
-
-            if (linelen < 0)
-                break;
-
-            if (linelen == 0)
-                /* The scanner has reached the end of HTTP/1.1 header, plus Content-Length, and the last /r/n in the header */
-                return next_offset + content_length;
-
-            if (linelen == tvb_reported_length_remaining(tvb, offset)) {
-                /* It seems that the line splits over several segments, we require ONE MORE SEGMENTS to handle this */
-                return -2;
-            }
-
-            line = tvb_get_ptr(tvb, offset, linelen);
-            lineend = line + linelen;
-
-            /* Search for colon in the line */
-            linep = (const unsigned char*)memchr(line, ':', linelen);
-            colon_offset = linep - line;
-            /*
-             * Skip whitespace after the colon.
-             */
-            value_offset = colon_offset + 1;
-            while (value_offset < linelen
-                && ((c = line[value_offset]) == ' ' || c == '\t'))
-                value_offset++;
-
-            header_len = colon_offset;
-            hf_index = find_header_hf_value(line, linelen, header_len);
-
-            value_bytes_len = linelen - value_offset;
-            value_bytes = (char*)malloc(value_bytes_len + 1);
-            if (!value_bytes) {
-                ws_critical("Failed to allocate space, dissection impossible");
-                return -1;
-            }
-
-            memcpy(value_bytes, line + value_offset, value_bytes_len);
-            value_bytes[value_bytes_len] = '\0';
-            if (hf_index == -1) {
-                return -1; /* Malformed tvb ? */
-            }
-            /* Get the value of content length */
-            switch (headers[hf_index].special) {
-            case HDR_CONTENT_LENGTH:
-                content_length = g_ascii_strtoll(value_bytes, NULL, 10);
-                break;
-            default:
-                break;  /* We only handle Content-Length case*/
-            }
-
-            free(value_bytes);
-            offset = next_offset;
-        }
-    }
-
-    return -1;
 }

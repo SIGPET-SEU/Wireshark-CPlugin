@@ -12,7 +12,7 @@ void proto_reg_handoff_trojan(void); // 3. 将 Trojan 协议和解析器加载�
 /****************Trojan Utils Function*********************/
 
 static int dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
-static int dissect_trojan_response(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
+static int dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_);
 static bool dissect_trojan_heur_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, void* data);
 
 bool char_array_eq(const char* arr_1, const char* arr_2, size_t len);
@@ -60,6 +60,13 @@ static char* TLS_signature[TLS_SIGNUM] = {
     "\x17\x03\x03"  /* Application Data */
 };
 
+typedef enum {
+    TROJAN_UNKNOWN,
+    TROJAN_TLS,
+    TROJAN_HTTP,
+    TROJAN_ONE_MORE_SEGMENT,  /* Used if the tvb is too short to decide message type*/
+} TrojanRecordType;
+
 /****************Trojan Fields******************/
 
 static int hf_trojan_password;
@@ -69,6 +76,8 @@ static int hf_trojan_atype;
 static int hf_trojan_dst_addr;
 static int hf_trojan_dst_port;
 static int hf_trojan_tunnel_data; // 数据流
+static int hf_trojan_data_type;     /* Indicate the upper layer protocol */
+static int hf_trojan_data_length;   /* Indicate the upper layer payload length */
 
 /****************Trojan Fields End******************/
 

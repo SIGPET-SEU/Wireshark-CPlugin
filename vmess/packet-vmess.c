@@ -1130,7 +1130,7 @@ void vmess_keylog_process_line(const char* data, size_t datalen, vmess_key_map_t
          * by computing sizeof(arr)/sizeof(arr[0]). Therefore, calling this macro
          * on a dynamically allocated array gives an incorrect answer.
          */
-        for (int i = 0; i < G_N_ELEMENTS(km_group); i++) {
+        for (long unsigned int i = 0; i < G_N_ELEMENTS(km_group); i++) {
             vmess_key_match_group_t* g = &km_group[i];
             hex_auth = g_match_info_fetch_named(mi, g->re_group_name);
             if (hex_auth && *hex_auth) {
@@ -1166,7 +1166,7 @@ void vmess_keylog_remove(vmess_key_map_t* mk)
     g_hash_table_remove_all(mk->response_token);
 }
 
-static void
+void
 vmess_keylog_reset(void)
 {
     if (vmess_keylog_file) {
@@ -1475,14 +1475,45 @@ vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, 
     return err;
 }
 
+static guint
+vmess_hash(gconstpointer v)
+{
+    guint l, hash;
+    const GString* id;
+    const guint* cur;
+    hash = 0;
+    id = (const GString*)v;
+    cur = (const guint*)(void*)id->str;
+
+    for (l = 4; (l < id->len); l += 4, cur++)
+        hash = hash ^ (*cur);
+
+    return hash;
+}
+
+static gint
+vmess_equal(gconstpointer v, gconstpointer v2)
+{
+    const GString* val1;
+    const GString* val2;
+    val1 = (const GString*)v;
+    val2 = (const GString*)v2;
+
+    if (val1->len == val2->len &&
+        !memcmp(val1->str, val2->str, val2->len)) {
+        return 1;
+    }
+    return 0;
+}
+
 void vmess_common_init(vmess_key_map_t* km)
 {
     // Use wmem to manage memory, instead of using g_free.
-    km->req_iv = g_hash_table_new(g_string_hash, g_string_equal);
-    km->req_key = g_hash_table_new(g_string_hash, g_string_equal);
-    km->data_iv = g_hash_table_new(g_string_hash, g_string_equal);
-    km->data_key = g_hash_table_new(g_string_hash, g_string_equal);
-    km->response_token = g_hash_table_new(g_string_hash, g_string_equal);
+    km->req_iv = g_hash_table_new(vmess_hash, vmess_equal);
+    km->req_key = g_hash_table_new(vmess_hash, vmess_equal);
+    km->data_iv = g_hash_table_new(vmess_hash, vmess_equal);
+    km->data_key = g_hash_table_new(vmess_hash, vmess_equal);
+    km->response_token = g_hash_table_new(vmess_hash, vmess_equal);
 }
 
 void vmess_init(void)

@@ -16,6 +16,7 @@
 #include <glib.h>
 #include <gcrypt.h>
 #include <stdarg.h> /* For variable number of args in VMess KDF */
+#include <errno.h>
 
 /* This should be put in tfs.h, but the compiler complains that initializer is not a constant */
 const true_false_string tfs_set_notset_vmess = { "Set", "Not set" };

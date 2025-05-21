@@ -42,7 +42,6 @@ static vmess_key_map_t vmess_key_map; /* Structure used for recording auth, key 
 
 static dissector_handle_t vmess_handle;
 static dissector_handle_t tls_handle;
-static dissector_handle_t vmess_request_handle;
 
 static bool vmess_desegment = true; /* VMess is run atop of TCP */
 
@@ -1926,7 +1925,7 @@ vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id)
     return NULL;
 }
 
-vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess)
+vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto)
 {
     vmess_conv_t* conv_data;
 

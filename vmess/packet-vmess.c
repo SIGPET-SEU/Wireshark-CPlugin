@@ -1650,6 +1650,8 @@ gboolean from_hex_raw(const char* in, gchar * out, guint datalen)
     return TRUE;
 }
 
+#define G_STRING_NEW_TAKE(string) g_string_new_len(string, strlen(string))
+
 void
 proto_register_vmess(void)
 {
@@ -1657,16 +1659,16 @@ proto_register_vmess(void)
 
     /* Initialize key derive labels */
     /* TODO: Free the paths when the file is closed */
-    kdfSaltConstAuthIDEncryptionKey = g_string_new_take("AES Auth ID Encryption");
-    kdfSaltConstAEADRespHeaderLenKey = g_string_new_take("AEAD Resp Header Len Key");
-    kdfSaltConstAEADRespHeaderLenIV = g_string_new_take("AEAD Resp Header Len IV");
-    kdfSaltConstAEADRespHeaderPayloadKey = g_string_new_take("AEAD Resp Header Key");
-    kdfSaltConstAEADRespHeaderPayloadIV = g_string_new_take("AEAD Resp Header IV");
-    kdfSaltConstVMessAEADKDF = g_string_new_take("VMess AEAD KDF");
-    kdfSaltConstVMessHeaderPayloadAEADKey = g_string_new_take("VMess Header AEAD Key");
-    kdfSaltConstVMessHeaderPayloadAEADIV = g_string_new_take("VMess Header AEAD Nonce");
-    kdfSaltConstVMessHeaderPayloadLengthAEADKey = g_string_new_take("VMess Header AEAD Key_Length");
-    kdfSaltConstVMessHeaderPayloadLengthAEADIV = g_string_new_take("VMess Header AEAD Nonce_Length");
+    kdfSaltConstAuthIDEncryptionKey = G_STRING_NEW_TAKE("AES Auth ID Encryption");
+    kdfSaltConstAEADRespHeaderLenKey = G_STRING_NEW_TAKE("AEAD Resp Header Len Key");
+    kdfSaltConstAEADRespHeaderLenIV = G_STRING_NEW_TAKE("AEAD Resp Header Len IV");
+    kdfSaltConstAEADRespHeaderPayloadKey = G_STRING_NEW_TAKE("AEAD Resp Header Key");
+    kdfSaltConstAEADRespHeaderPayloadIV = G_STRING_NEW_TAKE("AEAD Resp Header IV");
+    kdfSaltConstVMessAEADKDF = G_STRING_NEW_TAKE("VMess AEAD KDF");
+    kdfSaltConstVMessHeaderPayloadAEADKey = G_STRING_NEW_TAKE("VMess Header AEAD Key");
+    kdfSaltConstVMessHeaderPayloadAEADIV = G_STRING_NEW_TAKE("VMess Header AEAD Nonce");
+    kdfSaltConstVMessHeaderPayloadLengthAEADKey = G_STRING_NEW_TAKE("VMess Header AEAD Key_Length");
+    kdfSaltConstVMessHeaderPayloadLengthAEADIV = G_STRING_NEW_TAKE("VMess Header AEAD Nonce_Length");
 
     static hf_register_info hf[] = {
         { &hf_vmess_request_auth,

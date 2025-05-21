@@ -1929,7 +1929,7 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto)
 {
     vmess_conv_t* conv_data;
 
-    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
+    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto);
     if (conv_data != NULL)
         return conv_data;
 
@@ -1948,7 +1948,7 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto)
     /* Defer the port and address initialization to dissect VMess Request */
 
     /* Add the conv_data to the conversation in this routine. */
-    conversation_add_proto_data(conversation, proto_vmess, conv_data);
+    conversation_add_proto_data(conversation, proto, conv_data);
     return conv_data;
 }
 

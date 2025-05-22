@@ -14,6 +14,11 @@
  * <http://shadowsocks.org>
  */
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized" // Suppress for GCC/Clang temporarily, fix uninitialized tvb later
+#endif
+
 /********** Logging Domain **********/
 #define WS_LOG_DOMAIN "packet-shadowsocks"
 #ifndef SS_DEBUG
@@ -701,8 +706,8 @@ int dissect_ss_relay_header(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 
 int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree * tree, proto_tree *ss_tree, void *data _U_)
 {
-    proto_item *stream_data_ti;
-    proto_tree *stream_data_tree;
+    //proto_item *stream_data_ti;
+    //proto_tree *stream_data_tree;
     conversation_t *conversation;
     ss_conv_data_t *conv_data;
     dissector_handle_t tls_handle;
@@ -710,8 +715,8 @@ int dissect_ss_stream_data(tvbuff_t *tvb, packet_info *pinfo, proto_tree * tree,
 
     /*** Column Info & Protocol Tree ***/
     col_append_str(pinfo->cinfo, COL_INFO, "[Stream Data]");
-    stream_data_ti = proto_tree_add_item(ss_tree, hf_stream_data_node, tvb, 0, -1, ENC_NA);
-    stream_data_tree = proto_item_add_subtree(stream_data_ti, ett_ss);
+    //stream_data_ti = proto_tree_add_item(ss_tree, hf_stream_data_node, tvb, 0, -1, ENC_NA);
+    //stream_data_tree = proto_item_add_subtree(stream_data_ti, ett_ss);
 
     /*** Conversation ***/
     conversation = find_or_create_conversation(pinfo);

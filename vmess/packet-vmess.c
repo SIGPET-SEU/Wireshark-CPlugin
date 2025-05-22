@@ -42,7 +42,6 @@ static vmess_key_map_t vmess_key_map; /* Structure used for recording auth, key 
 
 static dissector_handle_t vmess_handle;
 static dissector_handle_t tls_handle;
-static dissector_handle_t vmess_request_handle;
 
 static bool vmess_desegment = true; /* VMess is run atop of TCP */
 
@@ -1130,7 +1129,7 @@ void vmess_keylog_process_line(const char* data, size_t datalen, vmess_key_map_t
          * by computing sizeof(arr)/sizeof(arr[0]). Therefore, calling this macro
          * on a dynamically allocated array gives an incorrect answer.
          */
-        for (int i = 0; i < G_N_ELEMENTS(km_group); i++) {
+        for (long unsigned int i = 0; i < G_N_ELEMENTS(km_group); i++) {
             vmess_key_match_group_t* g = &km_group[i];
             hex_auth = g_match_info_fetch_named(mi, g->re_group_name);
             if (hex_auth && *hex_auth) {
@@ -1166,7 +1165,7 @@ void vmess_keylog_remove(vmess_key_map_t* mk)
     g_hash_table_remove_all(mk->response_token);
 }
 
-static void
+void
 vmess_keylog_reset(void)
 {
     if (vmess_keylog_file) {
@@ -1475,14 +1474,45 @@ vmess_byte_decryption(VMessDecoder* decoder, const guchar* in, const gsize inl, 
     return err;
 }
 
+static guint
+vmess_hash(gconstpointer v)
+{
+    guint l, hash;
+    const GString* id;
+    const guint* cur;
+    hash = 0;
+    id = (const GString*)v;
+    cur = (const guint*)(void*)id->str;
+
+    for (l = 4; (l < id->len); l += 4, cur++)
+        hash = hash ^ (*cur);
+
+    return hash;
+}
+
+static gint
+vmess_equal(gconstpointer v, gconstpointer v2)
+{
+    const GString* val1;
+    const GString* val2;
+    val1 = (const GString*)v;
+    val2 = (const GString*)v2;
+
+    if (val1->len == val2->len &&
+        !memcmp(val1->str, val2->str, val2->len)) {
+        return 1;
+    }
+    return 0;
+}
+
 void vmess_common_init(vmess_key_map_t* km)
 {
     // Use wmem to manage memory, instead of using g_free.
-    km->req_iv = g_hash_table_new(g_string_hash, g_string_equal);
-    km->req_key = g_hash_table_new(g_string_hash, g_string_equal);
-    km->data_iv = g_hash_table_new(g_string_hash, g_string_equal);
-    km->data_key = g_hash_table_new(g_string_hash, g_string_equal);
-    km->response_token = g_hash_table_new(g_string_hash, g_string_equal);
+    km->req_iv = g_hash_table_new(vmess_hash, vmess_equal);
+    km->req_key = g_hash_table_new(vmess_hash, vmess_equal);
+    km->data_iv = g_hash_table_new(vmess_hash, vmess_equal);
+    km->data_key = g_hash_table_new(vmess_hash, vmess_equal);
+    km->response_token = g_hash_table_new(vmess_hash, vmess_equal);
 }
 
 void vmess_init(void)
@@ -1619,6 +1649,8 @@ gboolean from_hex_raw(const char* in, gchar * out, guint datalen)
     return TRUE;
 }
 
+#define G_STRING_NEW_TAKE(string) g_string_new_len(string, strlen(string))
+
 void
 proto_register_vmess(void)
 {
@@ -1626,16 +1658,16 @@ proto_register_vmess(void)
 
     /* Initialize key derive labels */
     /* TODO: Free the paths when the file is closed */
-    kdfSaltConstAuthIDEncryptionKey = g_string_new_take("AES Auth ID Encryption");
-    kdfSaltConstAEADRespHeaderLenKey = g_string_new_take("AEAD Resp Header Len Key");
-    kdfSaltConstAEADRespHeaderLenIV = g_string_new_take("AEAD Resp Header Len IV");
-    kdfSaltConstAEADRespHeaderPayloadKey = g_string_new_take("AEAD Resp Header Key");
-    kdfSaltConstAEADRespHeaderPayloadIV = g_string_new_take("AEAD Resp Header IV");
-    kdfSaltConstVMessAEADKDF = g_string_new_take("VMess AEAD KDF");
-    kdfSaltConstVMessHeaderPayloadAEADKey = g_string_new_take("VMess Header AEAD Key");
-    kdfSaltConstVMessHeaderPayloadAEADIV = g_string_new_take("VMess Header AEAD Nonce");
-    kdfSaltConstVMessHeaderPayloadLengthAEADKey = g_string_new_take("VMess Header AEAD Key_Length");
-    kdfSaltConstVMessHeaderPayloadLengthAEADIV = g_string_new_take("VMess Header AEAD Nonce_Length");
+    kdfSaltConstAuthIDEncryptionKey = G_STRING_NEW_TAKE("AES Auth ID Encryption");
+    kdfSaltConstAEADRespHeaderLenKey = G_STRING_NEW_TAKE("AEAD Resp Header Len Key");
+    kdfSaltConstAEADRespHeaderLenIV = G_STRING_NEW_TAKE("AEAD Resp Header Len IV");
+    kdfSaltConstAEADRespHeaderPayloadKey = G_STRING_NEW_TAKE("AEAD Resp Header Key");
+    kdfSaltConstAEADRespHeaderPayloadIV = G_STRING_NEW_TAKE("AEAD Resp Header IV");
+    kdfSaltConstVMessAEADKDF = G_STRING_NEW_TAKE("VMess AEAD KDF");
+    kdfSaltConstVMessHeaderPayloadAEADKey = G_STRING_NEW_TAKE("VMess Header AEAD Key");
+    kdfSaltConstVMessHeaderPayloadAEADIV = G_STRING_NEW_TAKE("VMess Header AEAD Nonce");
+    kdfSaltConstVMessHeaderPayloadLengthAEADKey = G_STRING_NEW_TAKE("VMess Header AEAD Key_Length");
+    kdfSaltConstVMessHeaderPayloadLengthAEADIV = G_STRING_NEW_TAKE("VMess Header AEAD Nonce_Length");
 
     static hf_register_info hf[] = {
         { &hf_vmess_request_auth,
@@ -1893,11 +1925,11 @@ vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id)
     return NULL;
 }
 
-vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess)
+vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto)
 {
     vmess_conv_t* conv_data;
 
-    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto_vmess);
+    conv_data = (vmess_conv_t*)conversation_get_proto_data(conversation, proto);
     if (conv_data != NULL)
         return conv_data;
 
@@ -1916,7 +1948,7 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess
     /* Defer the port and address initialization to dissect VMess Request */
 
     /* Add the conv_data to the conversation in this routine. */
-    conversation_add_proto_data(conversation, proto_vmess, conv_data);
+    conversation_add_proto_data(conversation, proto, conv_data);
     return conv_data;
 }
 

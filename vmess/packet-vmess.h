@@ -16,6 +16,7 @@
 #include <glib.h>
 #include <gcrypt.h>
 #include <stdarg.h> /* For variable number of args in VMess KDF */
+#include <errno.h>
 
 /* This should be put in tfs.h, but the compiler complains that initializer is not a constant */
 const true_false_string tfs_set_notset_vmess = { "Set", "Not set" };
@@ -326,7 +327,7 @@ typedef enum {
 typedef struct _vmess_message_info_t {
     guchar* plain_data;     /**< Decrypted data. */
     guint   data_len;       /**< Length of decrypted data. */
-    gint    id;             /**< Identifies the exact message within a frame
+    guint    id;             /**< Identifies the exact message within a frame
                                  (there can be multiple records in a frame). */
     struct _vmess_message_info_t* next;
     VMessRecordType type;
@@ -363,7 +364,7 @@ int dissect_decrypted_vmess_data(tvbuff_t* tvb, packet_info* pinfo, proto_tree* 
  * 
  * into a single routine.
  */
-vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto_vmess);
+vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto);
 
 /* Debug relavant variables and routines */
 /* From packet-ssh.c, packet-tls.c and packet-tls-utils.c */

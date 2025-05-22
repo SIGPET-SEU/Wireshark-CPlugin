@@ -512,7 +512,7 @@ dissect_trojan_heur_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, voi
 
 
     /* not trojan packet */
-    // printf("【Info Frame number %d】：dissect_trojan_heur_tls return false\n", pinfo->num);
+    // printf("[Info Frame number %d]：dissect_trojan_heur_tls return false\n", pinfo->num);
 
 
 
@@ -541,8 +541,6 @@ proto_reg_handoff_trojan(void)
     //prefs_register_filename_preference(ssl_module, "trojan_keylog_file", "Trojan-Secret log filename",
     //    "Trojan keylog file name",
     //    &(trojan_keylog_file_name), false);
-
-
 }
 
 void

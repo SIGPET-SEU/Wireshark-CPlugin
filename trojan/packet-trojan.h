@@ -21,7 +21,6 @@ gint tvb_find_TLS_signature(tvbuff_t* tvb);
 gint tvb_find_bytes(tvbuff_t* tvb, const gint offset, const gint max_length, const char* needle);
 gint mem_search(const char* haystack, guint haystack_size, const char* needle, guint needle_size);
 bool is_trojan_request(tvbuff_t* tvb);
-bool is_trojan_response(tvbuff_t* tvb);
 
 /**
  * Given a tree, return its n-th child (if exists), and return NULL if the tree or n-th child 

@@ -23,6 +23,14 @@ gint mem_search(const char* haystack, guint haystack_size, const char* needle, g
 bool is_trojan_request(tvbuff_t* tvb);
 bool is_trojan_response(tvbuff_t* tvb);
 
+/**
+ * Given a tree, return its n-th child (if exists), and return NULL if the tree or n-th child 
+ * does not exist.
+ * 
+ * If n == 0, return the parent itself.
+ */
+ proto_tree* proto_tree_get_child_nth(proto_tree* parent, guint n);
+
 /****************Trojan Utils Function End******************/
 /**
  * Change single port to port range, the usage is mentioned in packet-xml.c.
@@ -65,7 +73,8 @@ typedef enum {
     TROJAN_TLS,
     TROJAN_HTTP,
     TROJAN_ONE_MORE_SEGMENT,  /* Used if the tvb is too short to decide message type*/
-} TrojanRecordType;
+    TROJAN_UNINITIALIZED,
+} TrojanConvType;
 
 /****************Trojan Fields******************/
 
@@ -90,6 +99,8 @@ static gint ett_trojan;
 static reassembly_table proto_trojan_streaming_reassembly_table;
 /** information about a request and response on a VMess conversation. */
 typedef struct trojan_conv_data_t {
-    port_type save_port_type;
     streaming_reassembly_info_t* reassembly_info;
-} trojan_conv_data;
+    TrojanConvType conv_type;    
+} trojan_conv_t;
+
+trojan_conv_t* get_trojan_conv(conversation_t* conversation, const int proto);

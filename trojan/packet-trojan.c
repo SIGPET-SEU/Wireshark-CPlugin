@@ -300,6 +300,8 @@ dissect_trojan_http(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, voi
 
     /* Mark the outer TLS tunnel as Trojan layer */
     proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    proto_item_set_text(trojan_tree, "Trojan");
+
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_HTTP));
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
 
@@ -343,6 +345,7 @@ dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void
     proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_HTTP));
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
+    proto_item_set_text(trojan_tree, "Trojan");
 
     save_port_type = pinfo->ptype;
     save_can_desegment = pinfo->can_desegment;
@@ -399,6 +402,7 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
     //proto_get_id_by_short_name
 
     proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    proto_item_set_text(trojan_tree, "Trojan");
 
     //ti = proto_tree_add_item(tls_tree, proto_trojan, tvb, 0, -1, ENC_NA);
     proto_tree_add_item(trojan_tree, hf_trojan_password, tvb, offset, TROJAN_PASSWORD_LENGTH, ENC_BIG_ENDIAN);

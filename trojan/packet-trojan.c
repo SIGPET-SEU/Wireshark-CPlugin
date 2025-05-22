@@ -771,11 +771,6 @@ is_trojan_request(tvbuff_t* tvb) {
     return false;
 }
 
-bool
-is_trojan_response(tvbuff_t* tvb) {
-    return tvb_find_TLS_signature(tvb) == 0 ? true : false;
-}
-
 proto_tree* proto_tree_get_child_nth(proto_tree* parent, guint n)
 {
     if (!parent) return NULL;

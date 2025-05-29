@@ -89,6 +89,7 @@ static unsigned
 tls_record_length(tvbuff_t* tvb, int offset) {
     const guchar* raw_buf = tvb_get_ptr(tvb, offset, 5);
     guint plen = ((guint)raw_buf[3] << 8) + (guint)(raw_buf[4]) + 5;
+    return plen;
 }
 
 
@@ -158,7 +159,7 @@ trojan_data_type(tvbuff_t* tvb, int offset) {
 
 /* /* Find the index of HTTP header field index defined in headers */
 static int
-find_header_hf_value(char* line, int linelen, unsigned header_len)
+find_header_hf_value(const char* line, int linelen, unsigned header_len)
 {
     unsigned i;
 
@@ -218,7 +219,7 @@ http_frame_length(tvbuff_t* tvb, int offset) {
         int hf_index;
         int value_bytes_len;
         char* value_bytes;
-        char* linep;
+        const char* linep;
 
 
         linelen = tvb_find_line_end(tvb, offset,
@@ -285,70 +286,90 @@ http_frame_length(tvbuff_t* tvb, int offset) {
 
 static int
 dissect_trojan_http(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-    proto_item* ti;
-    proto_tree* trojan_tree;
-    ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, -1, ENC_NA);
-    trojan_tree = proto_item_add_subtree(ti, ett_trojan);
+    conversation_t* conversation;
+    trojan_conv_t* conv_data = NULL;
+
+    /* get conversation, create if necessary*/
+    conversation = find_or_create_conversation(pinfo);
+
+    /* get associated state information, create if necessary */
+    conv_data = get_trojan_conv(conversation, proto_trojan);
+
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "Trojan");
+    col_set_str(pinfo->cinfo, COL_INFO, "HTTP over Trojan");
+
+    /* Mark the outer TLS tunnel as Trojan layer */
+    proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    proto_item_set_text(trojan_tree, "Trojan");
+
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_HTTP));
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
-    return call_dissector_only(http_handle, tvb, pinfo, tree, data);
+
+    reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
+        tvb_reported_length_remaining(tvb, 0),
+        trojan_tree,
+        proto_tree_get_parent_tree(trojan_tree),
+        proto_trojan_streaming_reassembly_table,
+        conv_data->reassembly_info,
+        get_virtual_frame_num64(tvb, pinfo, tvb_reported_length_remaining(tvb, 0)),
+        http_handle,
+        proto_tree_get_parent_tree(tree),
+        NULL,
+        "Trojan",
+        &msg_fragment_items,
+        hf_msg_segment);
+
+    return tvb_reported_length_remaining(tvb, 0);
 }
 
 static int
 dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-    proto_item* ti;
-    proto_tree* trojan_tree;
     //tvbuff_t* next_tvb;
+
     port_type save_port_type;
     uint16_t save_can_desegment;
-    int ret;
+
     conversation_t* conversation;
-    trojan_conv_data* conv_data;
+    trojan_conv_t* conv_data = NULL;
+
+    /* get conversation, create if necessary*/
+    conversation = find_or_create_conversation(pinfo);
+
+    /* get associated state information, create if necessary */
+    conv_data = get_trojan_conv(conversation, proto_trojan);
 
     // printf(trojan_keylog_file_name, "\n");
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "Trojan");
+    col_set_str(pinfo->cinfo, COL_INFO, "TLS over Trojan");
 
-
-    
-    /*printf("--dissect_trojan_response\n");
-    printf("----pinfo->curr_layer_num: %d -----call tls_handle \n",pinfo->curr_layer_num);*/
-    // printf("----pinfo->ptype: %d\n", pinfo->ptype); //全是 PT_TCP
-    //printf("----pinfo->fd->visited: %d\n", pinfo->fd->visited); //第一轮全是0 后面全是1 所以应该不是影响的条件
-    //printf("can_desegment: %d, saved_can_desegment: %d\n", pinfo->can_desegment, pinfo->saved_can_desegment);//全是1,2
+    proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_HTTP));
+    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
+    proto_item_set_text(trojan_tree, "Trojan");
 
     save_port_type = pinfo->ptype;
     save_can_desegment = pinfo->can_desegment;
     pinfo->ptype = PT_NONE;
     pinfo->can_desegment = pinfo->saved_can_desegment;
 
-    conversation = find_or_create_conversation(pinfo);
-    conv_data = (trojan_conv_data *)conversation_get_proto_data(conversation, proto_trojan);
-    if (!conv_data) {
-        conv_data = wmem_new0(wmem_file_scope(), trojan_conv_data);
-        conv_data->save_port_type = save_port_type;
-        conv_data->reassembly_info = streaming_reassembly_info_new();
-        conversation_add_proto_data(conversation, proto_trojan, conv_data);
-    }
-
-
-    col_set_str(pinfo->cinfo, COL_INFO, "Trojan Response & call tls_handle");
-    ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, -1, ENC_NA);
-    trojan_tree = proto_item_add_subtree(ti, ett_trojan);
-    proto_tree_add_item(trojan_tree, hf_trojan_tunnel_data, tvb, 0, tvb_reported_length(tvb), ENC_BIG_ENDIAN);
-    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_TLS));
-    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
-
-    //next_tvb = tvb_new_subset_remaining(tvb, 0);
-
     dissector_add_string("tls.alpn", "h2", h2_handle);
     //dissector_add_string("tls.alpn", "http/1.1", http_tls_handle);
     //dissector_add_string("http.upgrade", "h2", h2_handle);
     //dissector_add_string("http.upgrade", "h2c", h2_handle);
 
-    ret = call_dissector_only(tls_handle, tvb, pinfo, trojan_tree, data);
-    //reassemble_streaming_data_and_call_subdissector(next_tvb, pinfo, 0, tvb_reported_length_remaining(next_tvb, 0),
-    //    trojan_tree, proto_tree_get_parent_tree(trojan_tree), proto_trojan_streaming_reassembly_table,
-    //    conv_data->reassembly_info, get_virtual_frame_num64(next_tvb, pinfo, 0), tls_handle,
-    //    proto_tree_get_parent_tree(tree), NULL, "Trojan", &msg_fragment_items, hf_msg_segment);
+    reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
+        tvb_reported_length_remaining(tvb, 0),
+        trojan_tree,
+        proto_tree_get_parent_tree(trojan_tree),
+        proto_trojan_streaming_reassembly_table,
+        conv_data->reassembly_info,
+        get_virtual_frame_num64(tvb, pinfo, tvb_reported_length_remaining(tvb, 0)),
+        tls_handle,
+        proto_tree_get_parent_tree(tree),
+        NULL,
+        "Trojan",
+        &msg_fragment_items,
+        hf_msg_segment);
 
     dissector_delete_string("tls.alpn", "h2", h2_handle);
     //dissector_delete_string("tls.alpn", "http/1.1", http_tls_handle);
@@ -358,28 +379,32 @@ dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void
     pinfo->ptype = save_port_type;
     pinfo->can_desegment = save_can_desegment;
 
-    return ret;
+    /* We introduce an "empty" fake Trojan layer for display filter */
+    proto_item* fake_trojan_ti;
+    proto_tree* fake_trojan_tree;
+
+    fake_trojan_ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, 0, ENC_NA);
+    proto_item_set_generated(fake_trojan_ti);
+    fake_trojan_tree = proto_item_add_subtree(fake_trojan_ti, ett_trojan);
+
+    return tvb_reported_length_remaining(tvb, 0);
 }
 
 static int
 dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
-    proto_item* ti;
-    proto_tree* trojan_tree;
+
     int offset = 0, second_crlf_pos;
-    // conversation_t* conversation;
 
-
-     /*printf("--dissect_trojan_request\n");
-     printf("----pinfo->curr_layer_num = %d\n", pinfo->curr_layer_num);*/
-
-
-    col_set_str(pinfo->cinfo, COL_INFO, "Trojan Request");
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "Trojan");
+    col_set_str(pinfo->cinfo, COL_INFO, "Trojan Request");
 
     // conversation = find_or_create_conversation(pinfo);
+    //proto_get_id_by_short_name
 
-    ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, -1, ENC_NA);
-    trojan_tree = proto_item_add_subtree(ti, ett_trojan);
+    proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    proto_item_set_text(trojan_tree, "Trojan");
+
+    //ti = proto_tree_add_item(tls_tree, proto_trojan, tvb, 0, -1, ENC_NA);
     proto_tree_add_item(trojan_tree, hf_trojan_password, tvb, offset, TROJAN_PASSWORD_LENGTH, ENC_BIG_ENDIAN);
     offset += TROJAN_PASSWORD_LENGTH;
     proto_tree_add_item(trojan_tree, hf_trojan_crlf, tvb, offset, TROJAN_CRLF_LENGTH, ENC_BIG_ENDIAN);
@@ -393,6 +418,8 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
         proto_tree_add_item(trojan_tree, hf_trojan_dst_addr, tvb, offset + 1, second_crlf_pos - TROJAN_PORT_LENGTH - 1, ENC_BIG_ENDIAN);// 这里为什么+1? trojan文档没写，但实际流量中，这个字节是没用的
         proto_tree_add_item(trojan_tree, hf_trojan_dst_port, tvb, offset + second_crlf_pos - TROJAN_PORT_LENGTH, TROJAN_PORT_LENGTH, ENC_BIG_ENDIAN);
         proto_tree_add_item(trojan_tree, hf_trojan_crlf, tvb, offset + second_crlf_pos, TROJAN_CRLF_LENGTH, ENC_BIG_ENDIAN);
+        proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
+
     }
 
     // todo: 后面还有数据吗?
@@ -409,6 +436,16 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
 */
 static int
 dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* data _U_) {
+    conversation_t* conversation;
+    trojan_conv_t* conv_data = NULL;
+
+    /* get conversation, create if necessary*/
+    conversation = find_or_create_conversation(pinfo);
+
+    /* get associated state information, create if necessary */
+    conv_data = get_trojan_conv(conversation, proto_trojan);
+
+
     /* trojan request packet */
     if (is_trojan_request(tvb)) {
         //*(tlsinfo->app_handle) = trojan_handle;
@@ -421,99 +458,30 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
     tvbuff_t* next_tvb;
 
     guint plen;
-    TrojanRecordType type = trojan_data_type(tvb, 0);
+
+    if (conv_data->conv_type == TROJAN_UNINITIALIZED)
+        /* Trojan conversation type should be inferred in the first data tvb */
+        conv_data->conv_type = trojan_data_type(tvb, 0);
+    
 
     unsigned (*get_pdu_len)(tvbuff_t*, int);
     dissector_t dissect_pdu;
 
-    switch (type) {
+    switch (conv_data->conv_type) {
     case TROJAN_HTTP:
-        get_pdu_len = http_frame_length;
+        //get_pdu_len = http_frame_length;
         dissect_pdu = dissect_trojan_http;
         break;
     case TROJAN_TLS:
-        get_pdu_len = tls_record_length;
+        //get_pdu_len = tls_record_length;
         dissect_pdu = dissect_trojan_tls;
         break;
     default:
         goto unknown;
     }
 
-    /* Desegmentation handling */
-    while (tvb_reported_length_remaining(tvb, offset) > 0) {
-        unsigned captured_length_remaining;
-        if (type == TROJAN_ONE_MORE_SEGMENT) {
-            if (proto_desegment && pinfo->can_desegment) {
-                /* One more piece of tvb is required to get the reassemble length */
-                pinfo->desegment_offset = offset;
-                pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
-                return 0;
-            }
-        }
-        plen = (*get_pdu_len)(tvb, offset);
-        if (plen == 0)
-            goto unknown;
+    (*dissect_pdu)(tvb, pinfo, tree, data);
 
-        captured_length_remaining = tvb_ensure_captured_length_remaining(tvb, offset);
-
-        if (!pinfo->fd->visited) {
-            unsigned remaining_bytes;
-            remaining_bytes = tvb_reported_length_remaining(tvb, offset);
-            if (plen > remaining_bytes) {
-                pinfo->want_pdu_tracking = 2;
-                pinfo->bytes_until_next_pdu = plen - remaining_bytes;
-            }
-        }
-
-        /*
-          * Can we do reassembly?
-          */
-        if (proto_desegment && pinfo->can_desegment) {
-            /*
-             * Yes - is the PDU split across segment boundaries?
-             */
-            if (captured_length_remaining < plen) {
-                /*
-                 * Yes.  Tell the TCP dissector where the data for this message
-                 * starts in the data it handed us, and how many more bytes we
-                 * need, and return.
-                 */
-                pinfo->desegment_offset = offset;
-                pinfo->desegment_len = plen - captured_length_remaining;
-                return 0;
-            }
-        }
-
-        /*
-         * Construct a tvbuff containing the amount of the payload we have
-         * available.  Make its reported length the amount of data in the PDU.
-         */
-        length = captured_length_remaining;
-        if (length > plen)
-            length = plen;
-        next_tvb = tvb_new_subset_length_caplen(tvb, offset, length, plen);
-        if (!(proto_desegment && pinfo->can_desegment)) {
-            if (plen > length) {
-                /* If we can't do reassembly but the PDU is split across
-                 * segment boundaries, mark the tvbuff as a fragment so
-                 * we throw FragmentBoundsError instead of malformed
-                 * errors.
-                 */
-                tvb_set_fragment(next_tvb);
-            }
-        }
-
-        (*dissect_pdu)(next_tvb, pinfo, tree, data);
-
-        /*
-         * Step to the next PDU.
-         * Make sure we don't overflow.
-         */
-        offset_before = offset;
-        offset += plen;
-        if (offset <= offset_before)
-            return 0;
-    }
 
     return tvb_captured_length(tvb);
     
@@ -532,7 +500,6 @@ dissect_trojan_heur_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, voi
 
     conversation_t* conversation;
     struct tlsinfo* tlsinfo = (struct tlsinfo*)data;
-   /* printf("【Info Frame number %d】：dissect_trojan_heur_tls, 4bytes: %s \n", pinfo->num, tvb_get_string_enc(wmem_packet_scope(), tvb, 0, 4, ENC_STRING));*/
 
     /* found trojan request or response(tunnel data) */
     if (is_trojan_request(tvb) || is_trojan_response(tvb)) {
@@ -545,7 +512,7 @@ dissect_trojan_heur_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree, voi
 
 
     /* not trojan packet */
-    // printf("【Info Frame number %d】：dissect_trojan_heur_tls return false\n", pinfo->num);
+    // printf("[Info Frame number %d]：dissect_trojan_heur_tls return false\n", pinfo->num);
 
 
 
@@ -560,11 +527,7 @@ proto_reg_handoff_trojan(void)
     h2_handle = find_dissector("http2");
     http_handle = find_dissector("http"); /* For OCSP dissection */
     http_tls_handle = find_dissector("http-over-tls");
-    //dissector_add_uint("tls.port", TROJAN_TLS_PORT, trojan_handle);
-    //dissector_add_string("tls.alpn", "http/1.1", trojan_handle);
-    //dissector_add_string("tls.alpn", "h2", trojan_handle);
-    //dissector_add_string("http.upgrade", "h2", trojan_handle);
-    //dissector_add_string("http.upgrade", "h2c", trojan_handle);
+
     dissector_add_uint_range_with_preference("tls.port", TROJAN_TLS_RANGE_PORT, trojan_handle);
     // dissector_add_for_decode_as("trojan", trojan_handle); // ui
 
@@ -578,8 +541,6 @@ proto_reg_handoff_trojan(void)
     //prefs_register_filename_preference(ssl_module, "trojan_keylog_file", "Trojan-Secret log filename",
     //    "Trojan keylog file name",
     //    &(trojan_keylog_file_name), false);
-
-
 }
 
 void
@@ -642,43 +603,43 @@ proto_register_trojan(void)
         },
         // Trojan Fragment
          { &hf_msg_fragments,
-             {"Reassembled VMess Segments", "vmess.fragments",
+             {"Reassembled Trojan Segments", "trojan.fragments",
              FT_NONE, BASE_NONE, NULL, 0x00, NULL, HFILL }
          },
          { &hf_msg_fragment,
-             {"Message fragment", "vmess.fragment",
+             {"Message fragment", "trojan.fragment",
              FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_fragment_overlap,
-             {"Message fragment overlap", "vmess.fragment.overlap",
+             {"Message fragment overlap", "trojan.fragment.overlap",
              FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_fragment_overlap_conflicts,
              {"Message fragment overlapping with conflicting data",
-             "vmess.fragment.overlap.conflicts",
+             "trojan.fragment.overlap.conflicts",
              FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_fragment_multiple_tails,
              {"Message has multiple tail fragments",
-             "vmess.fragment.multiple_tails",
+             "trojan.fragment.multiple_tails",
              FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_fragment_too_long_fragment,
-             {"Message fragment too long", "vmess.fragment.too_long_fragment",
+             {"Message fragment too long", "trojan.fragment.too_long_fragment",
              FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_fragment_error,
-             {"Message defragmentation error", "vmess.fragment.error",
+             {"Message defragmentation error", "trojan.fragment.error",
              FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_fragment_count,
-             {"Message fragment count", "vmess.fragment.count",
+             {"Message fragment count", "trojan.fragment.count",
              FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_reassembled_in,
-             {"Reassembled in", "vmess.reassembled_in",
+             {"Reassembled in", "trojan.reassembled_in",
              FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_reassembled_length,
-             {"Reassembled length", "vmess.reassembled.length",
+             {"Reassembled length", "trojan.reassembled.length",
              FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
          { &hf_msg_reassembled_data,
-             {"Reassembled data",  "vmess.reassembled.data",
+             {"Reassembled data",  "trojan.reassembled.data",
              FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL} },
          { &hf_msg_segment,
-             {"VMess segment", "vmess.segment_data",
+             {"Trojan segment", "trojan.segment_data",
              FT_BYTES, BASE_NONE, NULL, 0x00, NULL, HFILL } },
 
     };
@@ -810,7 +771,33 @@ is_trojan_request(tvbuff_t* tvb) {
     return false;
 }
 
-bool
-is_trojan_response(tvbuff_t* tvb) {
-    return tvb_find_TLS_signature(tvb) == 0 ? true : false;
+proto_tree* proto_tree_get_child_nth(proto_tree* parent, guint n)
+{
+    if (!parent) return NULL;
+    if (n == 0) return parent;
+    proto_tree* child = parent->first_child;
+
+    for (guint i = 2; i <= n; i++) {
+        if (!child) return NULL;
+        child = child->next;
+    }
+    return child;
+}
+
+trojan_conv_t* get_trojan_conv(conversation_t* conversation, const int proto)
+{
+    trojan_conv_t* conv_data;
+
+    conv_data = (trojan_conv_t*)conversation_get_proto_data(conversation, proto);
+    if (conv_data != NULL)
+        return conv_data;
+
+    /* no previous Trojan conversation info, initialize it. */
+    conv_data = wmem_new0(wmem_file_scope(), trojan_conv_t);
+    conv_data->reassembly_info = streaming_reassembly_info_new();
+    /* Defer the conversation type inference in dissect_trojan routine */
+    conv_data->conv_type = TROJAN_UNINITIALIZED;
+    conversation_add_proto_data(conversation, proto_trojan, conv_data);
+
+    return conv_data;
 }

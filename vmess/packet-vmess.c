@@ -954,10 +954,8 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 if (packet) {
                     /* RespV will only appear at the first byte within the first message */
                     vmess_message_info_t* msg = packet->messages;
-                    GString* respV = g_string_new_len(msg->plain_data, VMESS_RESPV_LENGTH);
 
-                    if (g_string_equal(respV, conv_data->respV) &&
-                        memcmp(msg->plain_data + VMESS_RESPV_LENGTH, "\x00\x00\x00", 3) == 0) {
+                    if (msg->type == VMESS_RESPONSE) {
                         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
                             VMESS_RESPONSE_HEADER_LENGTH + VMESS_DATA_HEADER_LENGTH,
                             get_dissect_vmess_response_len,
@@ -968,7 +966,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                             VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
                             dissect_vmess_data_pdu, data);
                     }
-                    g_string_free(respV, TRUE);
                 }
             }
         }
@@ -1629,7 +1626,7 @@ gboolean from_hex(const char* in, GString* out, size_t datalen) {
         a = ws_xton(in[i]), b = ws_xton(in[i + 1]);
         if (a == -1 || b == -1)
             return FALSE;
-        g_string_append_c(out, (guint8)(a << 4 | b));
+        g_string_append_c(out, (gchar)(a << 4 | b));
     }
     return TRUE;
 }

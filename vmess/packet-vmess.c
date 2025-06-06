@@ -282,12 +282,12 @@ decrypt_vmess_request(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_c
     }
 
     /* It seems that key=0 in p_add_proto_data is enough for VMess */
-    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, pinfo->curr_proto_layer_num);
     if (!packet) {
         packet = wmem_new0(wmem_file_scope(), vmess_packet_info_t);
         packet->from_server = FALSE;
         packet->messages = NULL;
-        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, pinfo->curr_proto_layer_num, packet);
     }
 
     /* Store respV for later use */
@@ -585,12 +585,12 @@ decrypt_vmess_response(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_
     }
 
     /* Store necessary information into packet and message structures */
-    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, pinfo->curr_proto_layer_num);
     if (!packet) {
         packet = wmem_new0(wmem_file_scope(), vmess_packet_info_t);
         packet->from_server = FALSE;
         packet->messages = NULL;
-        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, pinfo->curr_proto_layer_num, packet);
     }
 
     //gint record_id = tvb_raw_offset(tvb) + offset;
@@ -721,12 +721,12 @@ decrypt_vmess_data(tvbuff_t* tvb, packet_info* pinfo, guint32 offset, vmess_conv
     }
 
     /* Store necessary information into packet and message structures */
-    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, pinfo->curr_proto_layer_num);
     if (!packet) {
         packet = wmem_new0(wmem_file_scope(), vmess_packet_info_t);
         packet->from_server = FALSE;
         packet->messages = NULL;
-        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0, packet);
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_vmess, pinfo->curr_proto_layer_num, packet);
     }
 
 
@@ -856,10 +856,10 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
 
     vmess_keylog_read();
 
-    bool is_request = false;
+    //bool is_request = false;
 
     /* The request could be dissected only once, since it occupies exactly one packet. */
-    if (tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
+    if (!conv_data->auth && tvb_reported_length(tvb) > 61) { /* Minimum VMess request length */
         gchar* tmp_auth_raw_data = (gchar*)g_malloc((VMESS_AUTH_LENGTH + 1) * sizeof(gchar));
         tvb_get_raw_bytes_as_string(tvb, 0, tmp_auth_raw_data, (VMESS_AUTH_LENGTH + 1));
 
@@ -872,8 +872,9 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 /* Only when the auth is found should we create a auth in file scope */
                 conv_data->auth = wmem_new0(wmem_file_scope(), GString);
                 conv_data->auth = g_string_append_len(conv_data->auth, tmp_auth->str, tmp_auth->len);
+                conv_data->req_frame_num = pinfo->num;
             }
-            is_request = true;
+            //is_request = true;
             g_string_free(tmp_auth, true);
         }
         else {
@@ -896,7 +897,8 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
         }
     }
 
-    if (is_request) {
+    //if (is_request) {
+    if (pinfo->num == conv_data->req_frame_num) {
         dissect_vmess_request(tvb, pinfo, tree, data);
         vmess_debug_flush();
         return tvb_captured_length(tvb);
@@ -948,14 +950,12 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                 /* During the second pass, all frames are decrypted, we extract the first byte of the plain data
                 * to check respV to decide whether this frame is response or data frame.
                 */
-                vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+                vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, pinfo->curr_proto_layer_num);
                 if (packet) {
                     /* RespV will only appear at the first byte within the first message */
                     vmess_message_info_t* msg = packet->messages;
-                    GString* respV = g_string_new_len(msg->plain_data, VMESS_RESPV_LENGTH);
 
-                    if (g_string_equal(respV, conv_data->respV) &&
-                        memcmp(msg->plain_data + VMESS_RESPV_LENGTH, "\x00\x00\x00", 3) == 0) {
+                    if (msg->type == VMESS_RESPONSE) {
                         tcp_dissect_pdus(tvb, pinfo, tree, vmess_desegment,
                             VMESS_RESPONSE_HEADER_LENGTH + VMESS_DATA_HEADER_LENGTH,
                             get_dissect_vmess_response_len,
@@ -966,7 +966,6 @@ int dissect_vmess(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree _U_, void 
                             VMESS_DATA_HEADER_LENGTH, get_dissect_vmess_data_len,
                             dissect_vmess_data_pdu, data);
                     }
-                    g_string_free(respV, TRUE);
                 }
             }
         }
@@ -1627,7 +1626,7 @@ gboolean from_hex(const char* in, GString* out, size_t datalen) {
         a = ws_xton(in[i]), b = ws_xton(in[i + 1]);
         if (a == -1 || b == -1)
             return FALSE;
-        g_string_append_c(out, (guint8)(a << 4 | b));
+        g_string_append_c(out, (gchar)(a << 4 | b));
     }
     return TRUE;
 }
@@ -1913,7 +1912,7 @@ proto_reg_handoff_vmess(void)
 
 vmess_message_info_t* get_vmess_message(packet_info* pinfo, guint record_id)
 {
-    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, 0);
+    vmess_packet_info_t* packet = (vmess_packet_info_t*)p_get_proto_data(wmem_file_scope(), pinfo, proto_vmess, pinfo->curr_proto_layer_num);
     if (packet == NULL)
         return NULL;
 
@@ -1938,6 +1937,7 @@ vmess_conv_t* get_vmess_conv(conversation_t* conversation, const int proto)
     conv_data->req_decrypted = FALSE;
     conv_data->data_decrypted = FALSE;
     conv_data->resp_decrypted = FALSE;
+    conv_data->req_frame_num = 0;
     conv_data->auth = NULL;
     conv_data->reassembly_info = streaming_reassembly_info_new();
     conv_data->srv_data_decoder = NULL;

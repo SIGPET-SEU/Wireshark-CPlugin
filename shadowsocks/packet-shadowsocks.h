@@ -19,7 +19,7 @@
 
 /********** Constants **********/ 
 //#define SHADOWSOCKS_TCP_PORT 8388
-#define SHADOWSOCKS_TCP_PORT_RANGE "8388, 20013"
+#define SHADOWSOCKS_TCP_PORT_RANGE "8388, 20013, 58675, 20023, 21926, 50021"
 /* Ciphers */
 // NOTE: XChaCha20-Poly1305-IETF is removed in upstream, and not supported by libgcrypt
 #ifdef FS_HAVE_XCHACHA20IETF

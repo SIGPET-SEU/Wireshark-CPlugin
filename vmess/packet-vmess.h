@@ -282,6 +282,7 @@ typedef struct _vmess_conv_t {
     gboolean req_decrypted;     /* Used to check if the VMess header is decrypted */
     gboolean data_decrypted;    /* Used to check if the Data is decrypted */
     gboolean resp_decrypted;    /* Used to check if the Response Header is decrypted */
+    guint32 req_frame_num;     /* Used to mark the VMess request frame number */
     streaming_reassembly_info_t* reassembly_info;
     //vmess_decrypt_info_t* vmess_decrypt_info;
     VMessDecoder* req_length_decoder;

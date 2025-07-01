@@ -219,7 +219,7 @@ http_frame_length(tvbuff_t* tvb, int offset) {
         int hf_index;
         int value_bytes_len;
         char* value_bytes;
-        const char* linep;
+        const unsigned char* linep;
 
 
         linelen = tvb_find_line_end(tvb, offset,

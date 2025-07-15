@@ -36,7 +36,7 @@ bool is_trojan_request(tvbuff_t* tvb);
  * Although packet-http.c also records the usage, it seems to be quite complicated.
  */
 //#define TROJAN_TLS_PORT 49637
-#define TROJAN_TLS_RANGE_PORT "49637,56306,52002,52203,52107,52108,52201"
+#define TROJAN_TLS_RANGE_PORT "49637,56306,52002,52203,52107,52108,52201,52507"
 #define TROJAN_REQUEST_MAX_LENGTH 150 // Trojan 最大请求长度，非官方，
 #define TROJAN_PASSWORD_LENGTH 56
 #define TROJAN_CRLF_LENGTH 2

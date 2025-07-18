@@ -357,19 +357,36 @@ dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void
     //dissector_add_string("http.upgrade", "h2", h2_handle);
     //dissector_add_string("http.upgrade", "h2c", h2_handle);
 
-    reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
-        tvb_reported_length_remaining(tvb, 0),
-        trojan_tree,
-        proto_tree_get_parent_tree(trojan_tree),
-        proto_trojan_streaming_reassembly_table,
-        conv_data->reassembly_info,
-        get_virtual_frame_num64(tvb, pinfo, tvb_reported_length_remaining(tvb, 0)),
-        tls_handle,
-        proto_tree_get_parent_tree(tree),
-        NULL,
-        "Trojan",
-        &msg_fragment_items,
-        hf_msg_segment);
+    /* Try heuristic dissector on short, Out-of-Order (?) Trojan segments */
+    gboolean is_complete_tls = FALSE;
+    /* COMMENT: Shall we check if the tvb size is larger than 5? */
+    const guchar* plaintext = tvb_get_ptr(tvb, 0, 5);
+    guint plaintext_len = tvb_captured_length_remaining(tvb, 0);
+    // COMMENT: Shall we compare all possible TLS handshake types?
+    if (memcmp(plaintext, "\x17\x03\x03", 3) == 0) { // Such segments should "look like" TLS packets
+        guint possible_tls_len = ((guint)plaintext[3] << 8) + (guint)(plaintext[4]);
+        if (plaintext_len == possible_tls_len + 5) {
+            is_complete_tls = TRUE;
+            call_dissector_only(tls_handle, tvb, pinfo, tree, NULL);
+        }
+    }
+
+    if (!is_complete_tls) {
+        reassemble_streaming_data_and_call_subdissector(tvb, pinfo, 0,
+            tvb_reported_length_remaining(tvb, 0),
+            trojan_tree,
+            proto_tree_get_parent_tree(trojan_tree),
+            proto_trojan_streaming_reassembly_table,
+            conv_data->reassembly_info,
+            get_virtual_frame_num64(tvb, pinfo, tvb_reported_length_remaining(tvb, 0)),
+            tls_handle,
+            proto_tree_get_parent_tree(tree),
+            NULL,
+            "Trojan",
+            &msg_fragment_items,
+            hf_msg_segment);
+    }
+
 
     dissector_delete_string("tls.alpn", "h2", h2_handle);
     //dissector_delete_string("tls.alpn", "http/1.1", http_tls_handle);

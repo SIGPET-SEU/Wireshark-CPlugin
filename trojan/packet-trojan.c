@@ -319,6 +319,15 @@ dissect_trojan_http(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, voi
         &msg_fragment_items,
         hf_msg_segment);
 
+    /* We introduce an "empty" fake Trojan layer for display filter */
+    proto_item* fake_trojan_ti;
+    proto_tree* fake_trojan_tree;
+
+    fake_trojan_ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, 0, ENC_NA);
+    proto_item_set_generated(fake_trojan_ti);
+    fake_trojan_tree = proto_item_add_subtree(fake_trojan_ti, ett_trojan);
+    proto_item_set_text(fake_trojan_tree, "Fake Trojan");
+
     return tvb_reported_length_remaining(tvb, 0);
 }
 
@@ -343,7 +352,12 @@ dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void
     col_set_str(pinfo->cinfo, COL_INFO, "TLS over Trojan");
 
     proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
-    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_HTTP));
+    if (trojan_tree) {
+        if(trojan_tree->finfo->hfinfo)
+            if (memcmp(trojan_tree->finfo->hfinfo->name, "Reassembled", 10) == 0)
+                trojan_tree = trojan_tree->next;
+    }
+    proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_TLS));
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
     proto_item_set_text(trojan_tree, "Trojan");
 
@@ -403,6 +417,7 @@ dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void
     fake_trojan_ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, 0, ENC_NA);
     proto_item_set_generated(fake_trojan_ti);
     fake_trojan_tree = proto_item_add_subtree(fake_trojan_ti, ett_trojan);
+    proto_item_set_text(fake_trojan_tree, "Fake Trojan");
 
     return tvb_reported_length_remaining(tvb, 0);
 }
@@ -441,7 +456,15 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
 
     // todo: 后面还有数据吗?
 
-    // return offset + second_crlf_pos + TROJAN_CRLF_LENGTH; // 
+    // return offset + second_crlf_pos + TROJAN_CRLF_LENGTH; //
+    /* We introduce an "empty" fake Trojan layer for display filter */
+    proto_item* fake_trojan_ti;
+    proto_tree* fake_trojan_tree;
+
+    fake_trojan_ti = proto_tree_add_item(tree, proto_trojan, tvb, 0, 0, ENC_NA);
+    proto_item_set_generated(fake_trojan_ti);
+    fake_trojan_tree = proto_item_add_subtree(fake_trojan_ti, ett_trojan);
+    proto_item_set_text(fake_trojan_tree, "Fake Trojan");
     
     return tvb_captured_length(tvb);
 }
@@ -462,6 +485,12 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
     /* get associated state information, create if necessary */
     conv_data = get_trojan_conv(conversation, proto_trojan);
 
+    /*
+    * COMMENT: Shall we put the fake layer before actual dissection happens?
+    * 
+    * No, currently doing this prepends Fake Trojan layer before all proceeding layers,
+    * which makes locating the proper Trojan layer difficult.
+    */
 
     /* trojan request packet */
     if (is_trojan_request(tvb)) {
@@ -498,7 +527,6 @@ dissect_trojan(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void* da
     }
 
     (*dissect_pdu)(tvb, pinfo, tree, data);
-
 
     return tvb_captured_length(tvb);
     

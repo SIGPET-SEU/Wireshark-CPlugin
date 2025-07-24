@@ -299,7 +299,8 @@ dissect_trojan_http(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, voi
     col_set_str(pinfo->cinfo, COL_INFO, "HTTP over Trojan");
 
     /* Mark the outer TLS tunnel as Trojan layer */
-    proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    //proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    proto_tree* trojan_tree = proto_trojan_tree(tree);
     proto_item_set_text(trojan_tree, "Trojan");
 
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_HTTP));
@@ -351,12 +352,13 @@ dissect_trojan_tls(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, void
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "Trojan");
     col_set_str(pinfo->cinfo, COL_INFO, "TLS over Trojan");
 
-    proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
-    if (trojan_tree) {
-        if(trojan_tree->finfo->hfinfo)
-            if (memcmp(trojan_tree->finfo->hfinfo->name, "Reassembled", 10) == 0)
-                trojan_tree = trojan_tree->next;
-    }
+    //proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    //if (trojan_tree) {
+    //    if(trojan_tree->finfo->hfinfo)
+    //        if (memcmp(trojan_tree->finfo->hfinfo->name, "Reassembled", 10) == 0)
+    //            trojan_tree = trojan_tree->next;
+    //}
+    proto_tree* trojan_tree = proto_trojan_tree(tree);
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_type, tvb, 0, 0, TROJAN_TLS));
     proto_item_set_generated(proto_tree_add_uint(trojan_tree, hf_trojan_data_length, tvb, 0, 0, tvb_ensure_reported_length_remaining(tvb, 0)));
     proto_item_set_text(trojan_tree, "Trojan");
@@ -433,7 +435,8 @@ dissect_trojan_request(tvbuff_t* tvb, packet_info* pinfo, proto_tree* tree _U_, 
     // conversation = find_or_create_conversation(pinfo);
     //proto_get_id_by_short_name
 
-    proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    //proto_tree* trojan_tree = proto_tree_get_child_nth(tree, 5);
+    proto_tree* trojan_tree = proto_trojan_tree(tree);
     proto_item_set_text(trojan_tree, "Trojan");
 
     //ti = proto_tree_add_item(tls_tree, proto_trojan, tvb, 0, -1, ENC_NA);
@@ -827,6 +830,38 @@ proto_tree* proto_tree_get_child_nth(proto_tree* parent, guint n)
         child = child->next;
     }
     return child;
+}
+
+proto_tree* proto_trojan_tree(proto_tree* parent)
+{
+    if (!parent) return NULL;
+    proto_tree* child = parent->first_child;
+
+    guint protocol_shift = 49;  /* TLS1.3 Record Layer: Application Data Protocol: XXX */
+    guint search_range = 30;  /* An approimate range to search the desired protocol string*/
+    const char* needle = "Trojan";
+    guint needle_size = 6;
+
+    while (child) {
+        /* First, the desired layer must be a TLS layer, but has not been marked as Trojan yet. */
+        if (child->finfo->hfinfo && memcmp(child->finfo->hfinfo->abbrev, "tls", 3) == 0) {
+            /* Check if it has been marked as Trojan already */
+            if (!child->finfo->rep || memcmp(child->finfo->rep, needle, needle_size) != 0) {
+                /* Check if the complete tree has been constructed */
+                if (child->first_child && child->first_child->finfo->rep) {
+                    /* Check if the Application Data Protocol is Trojan */
+                    const char* representation = child->first_child->finfo->rep->representation;
+                    /* If not marked yet and application protocol is Trojan, then it should be returned */
+                    if (mem_search(representation + protocol_shift, search_range, needle, needle_size) >= 0)
+                        return child;
+                }
+                
+            }
+        }
+        child = child->next;
+    }
+
+    return NULL;  /* No such layer */
 }
 
 trojan_conv_t* get_trojan_conv(conversation_t* conversation, const int proto)

@@ -30,6 +30,11 @@ bool is_trojan_request(tvbuff_t* tvb);
  */
  proto_tree* proto_tree_get_child_nth(proto_tree* parent, guint n);
 
+ /**
+ * Iterate through the tree childs, find those TLS layers whose Application Data Protocol contains 'Trojan'.
+ */ 
+ proto_tree* proto_trojan_tree(proto_tree* parent);
+
 /****************Trojan Utils Function End******************/
 /**
  * Change single port to port range, the usage is mentioned in packet-xml.c.

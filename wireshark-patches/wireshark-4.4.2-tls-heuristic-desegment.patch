@@ -1,0 +1,17 @@
+diff --git a/epan/dissectors/packet-tls.c b/epan/dissectors/packet-tls.c
+index 241f218507..2841ee8e34 100644
+--- a/epan/dissectors/packet-tls.c
++++ b/epan/dissectors/packet-tls.c
+@@ -1913,6 +1913,12 @@ process_ssl_payload(tvbuff_t *tvb, int offset, packet_info *pinfo,
+             }
+             return;
+         }
++        /* A heuristic can require more decrypted TLS records before it can
++         * validate a protocol. Do not permanently select the port-based
++         * fallback while that reassembly request is pending. */
++        if (pinfo->desegment_len != 0) {
++            return;
++        }
+         if (app_handle_port) {
+             /* Heuristics failed, just try the port-based dissector. */
+             ssl_debug_printf("%s: no heuristics dissector, falling back to "

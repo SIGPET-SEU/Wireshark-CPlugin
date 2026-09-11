@@ -4,12 +4,16 @@ This Wireshark 4.4 plugin recognizes VLESS v0 request headers inside decrypted
 TLS application data. It deliberately uses an enabled TLS heuristic instead of
 claiming TCP/443.
 
-The heuristic validates the complete TCP request header and the beginning of a
+The heuristic validates the complete TCP request header and the complete first
 tunneled TLS record. Once matched, it assigns the TLS session application
 handle to VLESS. Request and response headers can span outer TLS records.
 Tunneled bytes are passed to the stock TLS dissector through a distinct
-PT_NONE conversation, so ALPN can select HTTP/1.1 or HTTP/2 without patches
-to either dissector.
+PT_NONE conversation, so ALPN can select HTTP/1.1 or HTTP/2 without modifying
+either dissector.
+
+Wireshark 4.4.2 needs the version-specific patch in ../wireshark-patches.
+It prevents the TCP/443 HTTP fallback while a TLS heuristic has a pending
+reassembly request.
 
 Implemented request fields:
 

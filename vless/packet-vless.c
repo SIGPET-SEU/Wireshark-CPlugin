@@ -100,6 +100,8 @@ typedef struct {
 	uint32_t client_port;
 	uint32_t request_header_frame;
 	uint32_t response_header_frame;
+	uint32_t request_header_seq;
+	uint32_t response_header_seq;
 } vless_conversation_t;
 
 static bool
@@ -243,6 +245,7 @@ parse_request(tvbuff_t *tvb)
 		result.bad_offset = offset;
 		return result;
 	}
+	REQUIRE_BYTES(offset + TLS_RECORD_HEADER_LENGTH + tvb_get_ntohs(tvb, offset + 3));
 	return result;
 #undef REQUIRE_BYTES
 }
@@ -328,9 +331,29 @@ call_inner_tls(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned off
 {
 	port_type saved_ptype;
 	tvbuff_t *payload;
+	unsigned available;
+	unsigned record_length;
+	unsigned needed;
 
 	if (offset >= tvb_captured_length(tvb))
 		return;
+	available = tvb_captured_length(tvb) - offset;
+	if (available < TLS_RECORD_HEADER_LENGTH) {
+		if (pinfo->can_desegment) {
+			pinfo->desegment_offset = offset;
+			pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
+		}
+		return;
+	}
+	record_length = tvb_get_ntohs(tvb, offset + 3);
+	needed = TLS_RECORD_HEADER_LENGTH + record_length;
+	if (available < needed) {
+		if (pinfo->can_desegment) {
+			pinfo->desegment_offset = offset;
+			pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
+		}
+		return;
+	}
 	payload = tvb_new_subset_remaining(tvb, offset);
 	saved_ptype = pinfo->ptype;
 	pinfo->ptype = PT_NONE;
@@ -342,7 +365,7 @@ call_inner_tls(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned off
 
 static int
 dissect_request(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
-	vless_conversation_t *state)
+	vless_conversation_t *state, uint32_t tls_seq)
 {
 	request_parse_t parsed = parse_request(tvb);
 
@@ -350,7 +373,7 @@ dissect_request(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 	col_set_str(pinfo->cinfo, COL_INFO, "VLESS TCP request");
 	if (parsed.status == PARSE_NEED_MORE && pinfo->can_desegment) {
 		pinfo->desegment_offset = 0;
-		pinfo->desegment_len = parsed.needed - tvb_captured_length(tvb);
+		pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
 		return tvb_captured_length(tvb);
 	}
 	if (parsed.status != PARSE_VALID) {
@@ -361,13 +384,14 @@ dissect_request(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 
 	request_tree_add(tvb, tree, &parsed);
 	state->request_header_frame = pinfo->num;
+	state->request_header_seq = tls_seq;
 	call_inner_tls(tvb, pinfo, tree, parsed.header_length);
 	return tvb_captured_length(tvb);
 }
 
 static int
 dissect_response(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
-	vless_conversation_t *state)
+	vless_conversation_t *state, uint32_t tls_seq)
 {
 	unsigned length = tvb_captured_length(tvb);
 	unsigned addons_length;
@@ -380,7 +404,7 @@ dissect_response(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 	if (length < 2) {
 		if (pinfo->can_desegment) {
 			pinfo->desegment_offset = 0;
-			pinfo->desegment_len = 2 - length;
+			pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
 			return length;
 		}
 		proto_tree_add_expert_format(tree, pinfo, &ei_vless_truncated, tvb,
@@ -393,7 +417,7 @@ dissect_response(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 	if (length < header_length) {
 		if (pinfo->can_desegment) {
 			pinfo->desegment_offset = 0;
-			pinfo->desegment_len = header_length - length;
+			pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
 			return length;
 		}
 		proto_tree_add_expert_format(tree, pinfo, &ei_vless_truncated, tvb,
@@ -414,6 +438,7 @@ dissect_response(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 	}
 
 	state->response_header_frame = pinfo->num;
+	state->response_header_seq = tls_seq;
 	call_inner_tls(tvb, pinfo, tree, header_length);
 	return length;
 }
@@ -426,11 +451,13 @@ packet_from_client(packet_info *pinfo, const vless_conversation_t *state)
 }
 
 static int
-dissect_vless(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
+dissect_vless(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
 {
 	conversation_t *conversation = find_or_create_conversation(pinfo);
 	vless_conversation_t *state = (vless_conversation_t *)
 		conversation_get_proto_data(conversation, proto_vless);
+	struct tlsinfo *tlsinfo = (struct tlsinfo *)data;
+	uint32_t tls_seq = tlsinfo != NULL ? tlsinfo->seq : 0;
 	bool from_client;
 
 	if (state == NULL) {
@@ -442,11 +469,13 @@ dissect_vless(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U
 	from_client = packet_from_client(pinfo, state);
 
 	if (from_client && (state->request_header_frame == 0 ||
-		state->request_header_frame == pinfo->num))
-		return dissect_request(tvb, pinfo, tree, state);
+		(state->request_header_frame == pinfo->num &&
+		 state->request_header_seq == tls_seq)))
+		return dissect_request(tvb, pinfo, tree, state, tls_seq);
 	if (!from_client && (state->response_header_frame == 0 ||
-		state->response_header_frame == pinfo->num))
-		return dissect_response(tvb, pinfo, tree, state);
+		(state->response_header_frame == pinfo->num &&
+		 state->response_header_seq == tls_seq)))
+		return dissect_response(tvb, pinfo, tree, state, tls_seq);
 
 	col_set_str(pinfo->cinfo, COL_PROTOCOL, "VLESS");
 	col_set_str(pinfo->cinfo, COL_INFO,
@@ -464,7 +493,7 @@ dissect_vless_heur_tls(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void
 
 	if (parsed.status == PARSE_NEED_MORE && pinfo->can_desegment) {
 		pinfo->desegment_offset = 0;
-		pinfo->desegment_len = parsed.needed - tvb_captured_length(tvb);
+		pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
 		return false;
 	}
 	if (parsed.status != PARSE_VALID || tlsinfo == NULL || tlsinfo->app_handle == NULL)

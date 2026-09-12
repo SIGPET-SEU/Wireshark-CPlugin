@@ -1,0 +1,91 @@
+diff --git a/epan/dissectors/packet-quic.c b/epan/dissectors/packet-quic.c
+index bc43d2c07a..3550b57412 100644
+--- a/epan/dissectors/packet-quic.c
++++ b/epan/dissectors/packet-quic.c
+@@ -224,6 +224,8 @@ static dissector_handle_t quic_handle;
+ static dissector_handle_t tls13_handshake_handle;
+ 
+ static dissector_table_t quic_proto_dissector_table;
++static heur_dissector_list_t quic_stream_heur_subdissector_list;
++static heur_dissector_list_t quic_datagram_heur_subdissector_list;
+ 
+ /* Fields for showing reassembly results for fragments of QUIC stream data. */
+ static const fragment_items quic_stream_fragment_items = {
+@@ -1455,14 +1457,23 @@ process_quic_stream(tvbuff_t *tvb, int offset, packet_info *pinfo, proto_tree *t
+                     quic_info_data_t *quic_info, quic_stream_info *stream_info,
+                     const quic_packet_info_t *quic_packet)
+ {
+-    if (quic_packet->packet_type != QUIC_LPT_0RTT && quic_info->app_handle) {
++    if (quic_packet->packet_type != QUIC_LPT_0RTT) {
+         tvbuff_t *next_tvb = tvb_new_subset_remaining(tvb, offset);
++        heur_dtbl_entry_t *hdtbl_entry;
+         // Traverse the STREAM frame tree.
+         proto_tree *top_tree = proto_tree_get_parent_tree(tree);
+         top_tree = proto_tree_get_parent_tree(top_tree);
+         // Subdissectors MUST NOT assume that 'stream_info' remains valid after
+         // returning. Copying the pointer will result in illegal memory access.
+-        call_dissector_with_data(quic_info->app_handle, next_tvb, pinfo, top_tree, stream_info);
++        if (dissector_try_heuristic(quic_stream_heur_subdissector_list,
++                                   next_tvb, pinfo, top_tree, &hdtbl_entry,
++                                   stream_info)) {
++            return;
++        }
++        if (quic_info->app_handle) {
++            call_dissector_with_data(quic_info->app_handle, next_tvb, pinfo,
++                                     top_tree, stream_info);
++        }
+     } else if (quic_packet->packet_type == QUIC_LPT_0RTT && quic_info->zrtt_app_handle) {
+         tvbuff_t *next_tvb = tvb_new_subset_remaining(tvb, offset);
+         proto_tree *top_tree = proto_tree_get_parent_tree(tree);
+@@ -2699,6 +2710,8 @@ dissect_quic_frame_type(tvbuff_t *tvb, packet_info *pinfo, proto_tree *quic_tree
+         break;
+         case FT_DATAGRAM:
+         case FT_DATAGRAM_LENGTH:{
++            quic_datagram_info datagram_info = { quic_info, from_server };
++            heur_dtbl_entry_t *hdtbl_entry;
+             int32_t dg_length;
+             uint64_t length;
+             col_append_str(pinfo->cinfo, COL_INFO, ", DG");
+@@ -2710,6 +2723,14 @@ dissect_quic_frame_type(tvbuff_t *tvb, packet_info *pinfo, proto_tree *quic_tree
+                 length = (uint32_t) tvb_reported_length_remaining(tvb, offset);
+             }
+             proto_tree_add_item(ft_tree, hf_quic_dg, tvb, offset, (uint32_t)length, ENC_NA);
++            if (length > 0 && length <= (uint64_t)tvb_captured_length_remaining(tvb, offset)) {
++                tvbuff_t *next_tvb = tvb_new_subset_length(tvb, offset, (uint32_t)length);
++                proto_tree *top_tree = proto_tree_get_parent_tree(ft_tree);
++                top_tree = proto_tree_get_parent_tree(top_tree);
++                dissector_try_heuristic(quic_datagram_heur_subdissector_list,
++                                        next_tvb, pinfo, top_tree, &hdtbl_entry,
++                                        &datagram_info);
++            }
+             offset += (uint32_t)length;
+         }
+         break;
+@@ -5681,6 +5702,10 @@ proto_register_quic(void)
+      * bytes, but in practice these do not exist yet.
+      */
+     quic_proto_dissector_table = register_dissector_table("quic.proto", "QUIC Protocol", proto_quic, FT_STRING, STRING_CASE_SENSITIVE);
++    quic_stream_heur_subdissector_list = register_heur_dissector_list_with_description(
++        "quic.stream", "QUIC stream payload", proto_quic);
++    quic_datagram_heur_subdissector_list = register_heur_dissector_list_with_description(
++        "quic.datagram", "QUIC DATAGRAM payload", proto_quic);
+ 
+     quic_follow_tap = register_tap("quic_follow");
+ }
+diff --git a/epan/dissectors/packet-quic.h b/epan/dissectors/packet-quic.h
+index a98307e412..5d1e92991c 100644
+--- a/epan/dissectors/packet-quic.h
++++ b/epan/dissectors/packet-quic.h
+@@ -33,6 +33,12 @@ typedef struct _quic_stream_info {
+     bool        from_server;
+ } quic_stream_info;
+ 
++/** Metadata for an RFC 9221 QUIC DATAGRAM frame. */
++typedef struct _quic_datagram_info {
++    struct quic_info_data *quic_info;    /**< Opaque QUIC connection. */
++    bool        from_server;
++} quic_datagram_info;
++
+ /*
+  * Although the QUIC SCID/DCID length field can store at most 255, v1 limits the
+  * CID length to 20.

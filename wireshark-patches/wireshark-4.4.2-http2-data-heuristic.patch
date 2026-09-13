@@ -1,0 +1,141 @@
+diff --git a/epan/dissectors/packet-http2.c b/epan/dissectors/packet-http2.c
+index 732514bed6..ea9c0b0171 100644
+--- a/epan/dissectors/packet-http2.c
++++ b/epan/dissectors/packet-http2.c
+@@ -97,6 +97,8 @@ static int http_eo_tap;
+ static dissector_table_t streaming_content_type_dissector_table;
+ 
+ static dissector_table_t stream_id_content_type_dissector_table;
++static heur_dissector_list_t http2_data_heur_subdissector_list;
++static dissector_handle_t http2_data_heur_handle;
+ 
+ #ifdef HAVE_NGHTTP2
+ /* The type of reassembly mode contains:
+@@ -237,6 +239,7 @@ typedef struct {
+     uint32_t response_in_frame_num;
+     nstime_t request_ts;
+     enum http2_data_reassembly_mode_t reassembly_mode;
++    heur_dtbl_entry_t *data_heuristic;
+     char *authority;
+     char *path;
+ } http2_stream_info_t;
+@@ -3218,6 +3221,23 @@ check_reassembly_completion_status(tvbuff_t* tvb, packet_info* pinfo, proto_tree
+  * Please refer to comments of the declaration of reassemble_streaming_data_and_call_subdissector() function in
+  * 'epan/reassemble.h' for more requirments about subdissectors.
+  */
++static int
++dissect_http2_data_heur_stream(tvbuff_t *tvb, packet_info *pinfo,
++                               proto_tree *tree, void *data)
++{
++    http2_data_info_t *data_info = (http2_data_info_t *)data;
++    conversation_t *conversation = find_or_create_conversation(pinfo);
++    http2_session_t *session = get_http2_session(pinfo, conversation);
++    http2_stream_info_t *stream_info = get_stream_info(pinfo, session, false);
++
++    if (stream_info->data_heuristic == NULL)
++        return 0;
++    data_info->probe = false;
++    call_heur_dissector_direct(stream_info->data_heuristic, tvb, pinfo, tree,
++                               data_info);
++    return tvb_captured_length(tvb);
++}
++
+ static void
+ reassemble_http2_data_according_to_subdissector(tvbuff_t* tvb, packet_info* pinfo, http2_session_t* http2_session,
+                                                 proto_tree* http2_tree, unsigned offset, uint8_t flags, int length)
+@@ -3234,9 +3254,17 @@ reassemble_http2_data_according_to_subdissector(tvbuff_t* tvb, packet_info* pinf
+         MEDIA_CONTAINER_HTTP_OTHERS, body_info->content_type_parameters, NULL, NULL
+     };
+     streaming_reassembly_info_t* reassembly_info = get_streaming_reassembly_info(pinfo, http2_session);
++    http2_stream_info_t* stream_info = get_stream_info(pinfo, http2_session, false);
++    http2_data_info_t data_info = {
++        stream_info->stream_id, false, IS_HTTP2_END_STREAM(flags) };
++    void* subdissector_data = &metadata_used_for_media_type_handle;
+ 
+     dissector_handle_t subdissector_handle = dissector_get_string_handle(streaming_content_type_dissector_table, content_type);
+-    if (subdissector_handle == NULL) {
++    if (stream_info->data_heuristic != NULL) {
++        subdissector_handle = http2_data_heur_handle;
++        subdissector_data = &data_info;
++        content_type = NULL;
++    } else if (subdissector_handle == NULL) {
+         /* We didn't get the content type, possibly because of byte errors.
+          * Note that the content type is per direction (as it should be)
+          * but reassembly_mode is set the same for *both* directions.
+@@ -3256,7 +3284,7 @@ reassemble_http2_data_according_to_subdissector(tvbuff_t* tvb, packet_info* pinf
+     reassemble_streaming_data_and_call_subdissector(
+         tvb, pinfo, offset, length, http2_tree, proto_tree_get_parent_tree(http2_tree),
+         http2_streaming_reassembly_table, reassembly_info, (uint64_t)cur_frame_num,
+-        subdissector_handle, proto_tree_get_parent_tree(http2_tree), &metadata_used_for_media_type_handle,
++        subdissector_handle, proto_tree_get_parent_tree(http2_tree), subdissector_data,
+         "HTTP2 body", &http2_body_fragment_items, hf_http2_data_segment);
+ 
+     pinfo->match_string = saved_match_string;
+@@ -3272,6 +3300,22 @@ dissect_http2_data_body(tvbuff_t *tvb, packet_info *pinfo, http2_session_t* h2se
+     try_init_stream_with_fake_headers(tvb, pinfo, h2session, http2_tree, offset);
+ 
+     http2_stream_info_t *stream_info = get_stream_info(pinfo, h2session, false);
++    if (stream_info->data_heuristic == NULL && length > 0) {
++        tvbuff_t *data_tvb = tvb_new_subset_length(tvb, offset, length);
++        heur_dtbl_entry_t *hdtbl_entry = NULL;
++        http2_data_info_t data_info = {
++            stream_info->stream_id, true, IS_HTTP2_END_STREAM(flags) };
++
++        if (dissector_try_heuristic(http2_data_heur_subdissector_list,
++                                    data_tvb, pinfo,
++                                    proto_tree_get_parent_tree(http2_tree),
++                                    &hdtbl_entry, &data_info)) {
++            stream_info->data_heuristic = hdtbl_entry;
++            stream_info->reassembly_mode = HTTP2_DATA_REASSEMBLY_MODE_STREAMING;
++            pinfo->desegment_offset = 0;
++            pinfo->desegment_len = 0;
++        }
++    }
+     if (stream_info->reassembly_mode == HTTP2_DATA_REASSEMBLY_MODE_STREAMING) {
+         reassemble_http2_data_according_to_subdissector(tvb, pinfo, h2session, http2_tree, offset, flags, length);
+         return;
+@@ -4967,6 +5011,8 @@ proto_register_http2(void)
+     register_cleanup_routine(&http2_cleanup_protocol);
+ 
+     http2_handle = register_dissector("http2", dissect_http2, proto_http2);
++    http2_data_heur_handle = register_dissector(
++        "http2.data.heur_stream", dissect_http2_data_heur_stream, proto_http2);
+ 
+     reassembly_table_register(&http2_body_reassembly_table,
+                               &addresses_ports_reassembly_table_functions);
+@@ -4980,6 +5026,9 @@ proto_register_http2(void)
+     stream_id_content_type_dissector_table =
+         register_dissector_table("http2.streamid", "HTTP2 content type in stream", proto_http2, FT_UINT32, BASE_DEC);
+ 
++    http2_data_heur_subdissector_list = register_heur_dissector_list_with_description(
++        "http2.data", "HTTP/2 DATA payload", proto_http2);
++
+     http2_tap = register_tap("http2");
+     http2_follow_tap = register_tap("http2_follow");
+ 
+diff --git a/epan/dissectors/packet-http2.h b/epan/dissectors/packet-http2.h
+index 9425824abb..e2333f8e90 100644
+--- a/epan/dissectors/packet-http2.h
++++ b/epan/dissectors/packet-http2.h
+@@ -29,6 +29,13 @@ extern "C" {
+ /* http2 for grpc */
+ #define HTTP2_HEADER_GRPC_ENCODING "grpc-encoding"
+ 
++/** Metadata passed to HTTP/2 DATA payload heuristic dissectors. */
++typedef struct _http2_data_info {
++    uint32_t stream_id; /**< HTTP/2 stream carrying this DATA payload. */
++    bool probe;         /**< true for structural detection, false for dissection. */
++    bool end_stream;    /**< true when the DATA frame closes this stream. */
++} http2_data_info_t;
++
+ int dissect_http2_pdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _U_ );
+ 
+ /** Get header value from current or the other direction stream.
+@@ -50,6 +57,7 @@ int dissect_http2_pdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void*
+  * get_http2_session, creating a HTTP/2 session on the current conversation,
+  * which can confuse the HTTP dissector. (This should be fixed.)
+  */
++WS_DLL_PUBLIC
+ const char* http2_get_header_value(packet_info *pinfo, const char* name, bool the_other_direction);
+ 
+ /**

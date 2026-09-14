@@ -11,6 +11,7 @@
 #include <epan/expert.h>
 #include <epan/packet.h>
 #include <epan/prefs.h>
+#include <epan/reassemble.h>
 #include <epan/wmem_scopes.h>
 #include <epan/dissectors/packet-tls.h>
 
@@ -28,6 +29,9 @@ void proto_reg_handoff_vless(void);
 static int proto_vless;
 static dissector_handle_t vless_handle;
 static dissector_handle_t tls_handle;
+
+static reassembly_table vless_inner_tls_reassembly_table;
+REASSEMBLE_ITEMS_DEFINE(vless_inner_tls, "VLESS inner TLS");
 
 static int hf_vless_version;
 static int hf_vless_uuid;
@@ -102,6 +106,8 @@ typedef struct {
 	uint32_t response_header_frame;
 	uint32_t request_header_seq;
 	uint32_t response_header_seq;
+	streaming_reassembly_info_t *request_reassembly;
+	streaming_reassembly_info_t *response_reassembly;
 } vless_conversation_t;
 
 static bool
@@ -327,39 +333,27 @@ request_expert_add(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 }
 
 static void
-call_inner_tls(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, unsigned offset)
+call_inner_tls_streaming(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
+	streaming_reassembly_info_t *reassembly_info, unsigned offset, uint32_t tls_seq)
 {
 	port_type saved_ptype;
-	tvbuff_t *payload;
-	unsigned available;
-	unsigned record_length;
-	unsigned needed;
+	int length;
+	uint64_t payload_id;
 
 	if (offset >= tvb_captured_length(tvb))
 		return;
-	available = tvb_captured_length(tvb) - offset;
-	if (available < TLS_RECORD_HEADER_LENGTH) {
-		if (pinfo->can_desegment) {
-			pinfo->desegment_offset = offset;
-			pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
-		}
-		return;
-	}
-	record_length = tvb_get_ntohs(tvb, offset + 3);
-	needed = TLS_RECORD_HEADER_LENGTH + record_length;
-	if (available < needed) {
-		if (pinfo->can_desegment) {
-			pinfo->desegment_offset = offset;
-			pinfo->desegment_len = DESEGMENT_ONE_MORE_SEGMENT;
-		}
-		return;
-	}
-	payload = tvb_new_subset_remaining(tvb, offset);
+
+	length = tvb_reported_length_remaining(tvb, offset);
+	/* Frame numbers keep this monotonic across the capture, while the outer
+	 * decrypted-stream sequence distinguishes coalesced TLS records. */
+	payload_id = ((uint64_t)pinfo->num << 32) | tls_seq;
 	saved_ptype = pinfo->ptype;
 	pinfo->ptype = PT_NONE;
-	call_dissector(tls_handle, payload, pinfo, tree);
-	if (pinfo->desegment_len != 0)
-		pinfo->desegment_offset += offset;
+	reassemble_streaming_data_and_call_subdissector(tvb, pinfo, offset, length,
+		tree, proto_tree_get_root(tree), vless_inner_tls_reassembly_table,
+		reassembly_info, payload_id, tls_handle, proto_tree_get_root(tree), NULL,
+		"VLESS inner TLS", &vless_inner_tls_fragment_items,
+		hf_vless_inner_tls_segment);
 	pinfo->ptype = saved_ptype;
 }
 
@@ -385,7 +379,8 @@ dissect_request(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 	request_tree_add(tvb, tree, &parsed);
 	state->request_header_frame = pinfo->num;
 	state->request_header_seq = tls_seq;
-	call_inner_tls(tvb, pinfo, tree, parsed.header_length);
+	call_inner_tls_streaming(tvb, pinfo, tree, state->request_reassembly,
+		parsed.header_length, tls_seq);
 	return tvb_captured_length(tvb);
 }
 
@@ -439,7 +434,8 @@ dissect_response(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 
 	state->response_header_frame = pinfo->num;
 	state->response_header_seq = tls_seq;
-	call_inner_tls(tvb, pinfo, tree, header_length);
+	call_inner_tls_streaming(tvb, pinfo, tree, state->response_reassembly,
+		header_length, tls_seq);
 	return length;
 }
 
@@ -465,6 +461,8 @@ dissect_vless(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
 		copy_address_wmem(wmem_file_scope(), &state->client_address, &pinfo->src);
 		state->client_port = pinfo->srcport;
 		conversation_add_proto_data(conversation, proto_vless, state);
+		state->request_reassembly = streaming_reassembly_info_new();
+		state->response_reassembly = streaming_reassembly_info_new();
 	}
 	from_client = packet_from_client(pinfo, state);
 
@@ -481,7 +479,9 @@ dissect_vless(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
 	col_set_str(pinfo->cinfo, COL_INFO,
 		from_client ? "VLESS tunneled request data" : "VLESS tunneled response data");
 	proto_tree_add_item(tree, proto_vless, tvb, 0, 0, ENC_NA);
-	call_inner_tls(tvb, pinfo, tree, 0);
+	call_inner_tls_streaming(tvb, pinfo, tree,
+		from_client ? state->request_reassembly : state->response_reassembly,
+		0, tls_seq);
 	return tvb_captured_length(tvb);
 }
 
@@ -535,12 +535,14 @@ proto_register_vless(void)
 		{ &hf_vless_response_addons_length,
 			{ "Response Addons Length", "vless.response.addons_length", FT_UINT8, BASE_DEC, NULL, 0x0, NULL, HFILL } },
 		{ &hf_vless_response_addons,
-			{ "Response Addons", "vless.response.addons", FT_BYTES, BASE_NONE, NULL, 0x0, NULL, HFILL } }
+			{ "Response Addons", "vless.response.addons", FT_BYTES, BASE_NONE, NULL, 0x0, NULL, HFILL } },
+		REASSEMBLE_INIT_HF_ITEMS(vless_inner_tls, "VLESS inner TLS", "vless.inner_tls")
 	};
 	static int *ett[] = {
 		&ett_vless,
 		&ett_vless_request,
-		&ett_vless_response
+		&ett_vless_response,
+		REASSEMBLE_INIT_ETT_ITEMS(vless_inner_tls)
 	};
 	static ei_register_info ei[] = {
 		{ &ei_vless_malformed,
@@ -560,6 +562,8 @@ proto_register_vless(void)
 	proto_vless = proto_register_protocol("VLESS v0", "VLESS", "vless");
 	proto_register_field_array(proto_vless, hf, array_length(hf));
 	proto_register_subtree_array(ett, array_length(ett));
+	reassembly_table_register(&vless_inner_tls_reassembly_table,
+		&addresses_ports_reassembly_table_functions);
 	expert_vless = expert_register_protocol(proto_vless);
 	expert_register_field_array(expert_vless, ei, array_length(ei));
 	vless_module = prefs_register_protocol(proto_vless, NULL);

@@ -7,9 +7,12 @@ claiming TCP/443.
 The heuristic validates the complete TCP request header and the complete first
 tunneled TLS record. Once matched, it assigns the TLS session application
 handle to VLESS. Request and response headers can span outer TLS records.
-Tunneled bytes are passed to the stock TLS dissector through a distinct
+After recognition, tunneled bytes are fed through Wireshark's streaming
+reassembly helper with independent request and response state. This preserves
+inner TLS records that span multiple decrypted outer TLS records. The
+reassembled stream is passed to the stock TLS dissector through a distinct
 PT_NONE conversation, so ALPN can select HTTP/1.1 or HTTP/2 without modifying
-either dissector.
+either application dissector.
 
 Wireshark 4.4.2 needs the version-specific patch in ../wireshark-patches.
 It prevents the TCP/443 HTTP fallback while a TLS heuristic has a pending
@@ -31,7 +34,8 @@ An optional vless.expected_uuid string preference accepts canonical UUID text
 or 32 hexadecimal digits. When set, only that UUID is accepted by the
 heuristic. It is unset by default.
 
-Useful display filters include vless, vless.command == 1,
+Useful display filters include vless, vless.inner_tls.reassembled.in,
+vless.command == 1,
 vless.destination.port == 443, vless.address_type == 2, and
 vless.response.version == 0.
 

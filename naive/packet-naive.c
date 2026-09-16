@@ -50,10 +50,24 @@ static expert_field ei_naive_truncated = EI_INIT;
 static expert_field ei_naive_unsupported_payload = EI_INIT;
 
 static wmem_map_t *naive_streams;
-static uint32_t naive_last_frame;
+static wmem_map_t *naive_calls;
 
 static const value_string direction_values[] = {
     {0, "client to server"}, {1, "server to client"}, {0, NULL}};
+
+typedef struct naive_cached_tls_record {
+  struct naive_cached_tls_record *next;
+  unsigned length;
+  uint8_t bytes[];
+} naive_cached_tls_record;
+
+typedef struct {
+  uint8_t padding_frames_start;
+  bool processed;
+  bool unsupported_payload;
+  naive_cached_tls_record *first_record;
+  naive_cached_tls_record *last_record;
+} naive_call_state;
 
 typedef struct {
   uint8_t padding_frames[2];
@@ -64,6 +78,7 @@ typedef struct {
 
 static void naive_init(void) {
   naive_streams = wmem_map_new(wmem_file_scope(), g_str_hash, g_str_equal);
+  naive_calls = wmem_map_new(wmem_file_scope(), g_str_hash, g_str_equal);
 }
 
 static bool naive_header_padding_valid(const char *padding) {
@@ -139,6 +154,43 @@ static naive_stream_state *naive_get_state(packet_info *pinfo,
   return state;
 }
 
+static naive_call_state *naive_get_call_state(
+    packet_info *pinfo, uint32_t stream_id, unsigned direction,
+    uint64_t data_id,
+    const naive_stream_state *stream_state) {
+  conversation_t *conversation = find_or_create_conversation(pinfo);
+  char *key = wmem_strdup_printf(wmem_packet_scope(), "%p:%" PRIu32
+                                ":%u:%" PRIu64,
+                                (void *)conversation, stream_id, direction,
+                                data_id);
+  naive_call_state *call_state =
+      (naive_call_state *)wmem_map_lookup(naive_calls, key);
+
+  if (call_state == NULL && !PINFO_FD_VISITED(pinfo)) {
+    char *stored_key = wmem_strdup(wmem_file_scope(), key);
+    call_state = wmem_new0(wmem_file_scope(), naive_call_state);
+    call_state->padding_frames_start =
+        stream_state->padding_frames[direction];
+    wmem_map_insert(naive_calls, stored_key, call_state);
+  }
+  return call_state;
+}
+
+static naive_cached_tls_record *naive_cache_tls_record(
+    naive_call_state *call_state, const uint8_t *bytes, unsigned length) {
+  naive_cached_tls_record *record = (naive_cached_tls_record *)wmem_alloc(
+      wmem_file_scope(), sizeof(*record) + length);
+  record->next = NULL;
+  record->length = length;
+  memcpy(record->bytes, bytes, length);
+  if (call_state->last_record != NULL)
+    call_state->last_record->next = record;
+  else
+    call_state->first_record = record;
+  call_state->last_record = record;
+  return record;
+}
+
 static bool naive_tls_record_plausible(const uint8_t *bytes, size_t length,
                                        unsigned *record_length) {
   unsigned payload_length;
@@ -186,7 +238,8 @@ static void naive_process_tunnel_bytes(tvbuff_t *parent, packet_info *pinfo,
                                        naive_stream_state *state,
                                        unsigned direction, const uint8_t *bytes,
                                        unsigned length,
-                                       proto_tree *naive_tree) {
+                                       proto_tree *naive_tree,
+                                       naive_call_state *call_state) {
   GByteArray *buffer = state->tls_bytes[direction];
 
   if (length == 0)
@@ -218,6 +271,7 @@ static void naive_process_tunnel_bytes(tvbuff_t *parent, packet_info *pinfo,
       call_dissector(data_handle, payload, pinfo, tree);
       proto_tree_add_expert(naive_tree, pinfo, &ei_naive_unsupported_payload,
                             parent, 0, tvb_captured_length(parent));
+      call_state->unsupported_payload = true;
       g_byte_array_set_size(buffer, 0);
       state->inner_is_tls[direction] = 0;
       return;
@@ -225,11 +279,33 @@ static void naive_process_tunnel_bytes(tvbuff_t *parent, packet_info *pinfo,
     state->inner_is_tls[direction] = 1;
     if (buffer->len < record_length)
       return;
+    naive_cached_tls_record *record =
+        naive_cache_tls_record(call_state, buffer->data, record_length);
     proto_tree_add_uint(naive_tree, hf_naive_reassembled_tls_length, parent, 0,
                         0, record_length);
-    naive_call_inner_tls(parent, pinfo, tree, state, buffer->data,
-                         record_length);
+    naive_call_inner_tls(parent, pinfo, tree, state, record->bytes,
+                         record->length);
     g_byte_array_remove_range(buffer, 0, record_length);
+  }
+}
+
+static void naive_replay_call(tvbuff_t *parent, packet_info *pinfo,
+                              proto_tree *tree,
+                              const naive_stream_state *stream_state,
+                              const naive_call_state *call_state,
+                              proto_tree *naive_tree) {
+  const naive_cached_tls_record *record;
+
+  for (record = call_state->first_record; record != NULL;
+       record = record->next) {
+    proto_tree_add_uint(naive_tree, hf_naive_reassembled_tls_length, parent, 0,
+                        0, record->length);
+    naive_call_inner_tls(parent, pinfo, tree, stream_state, record->bytes,
+                         record->length);
+  }
+  if (call_state->unsupported_payload) {
+    proto_tree_add_expert(naive_tree, pinfo, &ei_naive_unsupported_payload,
+                          parent, 0, tvb_captured_length(parent));
   }
 }
 
@@ -270,6 +346,9 @@ static bool dissect_naive_http2_data(tvbuff_t *tvb, packet_info *pinfo,
   unsigned offset = 0;
   unsigned length = tvb_captured_length(tvb);
   naive_stream_state *state;
+  naive_call_state *call_state;
+  unsigned padding_frames;
+  bool replay;
   proto_item *item;
   proto_tree *naive_tree;
 
@@ -285,10 +364,6 @@ static bool dissect_naive_http2_data(tvbuff_t *tvb, packet_info *pinfo,
            naive_header_padding_valid(padding) && naive_target_valid(target);
   }
 
-  if (pinfo->num < naive_last_frame)
-    naive_init();
-  naive_last_frame = pinfo->num;
-
   from_server =
       method == NULL || strcmp(method, HTTP2_HEADER_METHOD_CONNECT) != 0;
   direction = from_server ? 1 : 0;
@@ -301,6 +376,12 @@ static bool dissect_naive_http2_data(tvbuff_t *tvb, packet_info *pinfo,
     status = NULL;
   }
   state = naive_get_state(pinfo, data_info->stream_id);
+  call_state = naive_get_call_state(pinfo, data_info->stream_id, direction,
+                                    data_info->data_id, state);
+  if (call_state == NULL)
+    return true;
+  padding_frames = call_state->padding_frames_start;
+  replay = PINFO_FD_VISITED(pinfo) || call_state->processed;
 
   col_set_str(pinfo->cinfo, COL_PROTOCOL, "NAIVE");
   col_set_str(pinfo->cinfo, COL_INFO,
@@ -320,8 +401,7 @@ static bool dissect_naive_http2_data(tvbuff_t *tvb, packet_info *pinfo,
     proto_tree_add_string(naive_tree, hf_naive_response_status, tvb, 0, 0,
                           status);
 
-  while (offset < length &&
-         state->padding_frames[direction] < NAIVE_PADDING_FRAMES) {
+  while (offset < length && padding_frames < NAIVE_PADDING_FRAMES) {
     unsigned remaining = length - offset;
     unsigned data_length;
     unsigned padding_length;
@@ -334,6 +414,11 @@ static bool dissect_naive_http2_data(tvbuff_t *tvb, packet_info *pinfo,
                               offset, remaining);
         return true;
       }
+      if (replay)
+        naive_replay_call(tvb, pinfo, tree, state, call_state, naive_tree);
+      call_state->processed = true;
+      if (PINFO_FD_VISITED(pinfo))
+        return true;
       pinfo->desegment_offset = offset;
       pinfo->desegment_len = 3 - remaining;
       return true;
@@ -347,32 +432,45 @@ static bool dissect_naive_http2_data(tvbuff_t *tvb, packet_info *pinfo,
                               offset, remaining);
         return true;
       }
+      if (replay)
+        naive_replay_call(tvb, pinfo, tree, state, call_state, naive_tree);
+      call_state->processed = true;
+      if (PINFO_FD_VISITED(pinfo))
+        return true;
       pinfo->desegment_offset = offset;
       pinfo->desegment_len = total - remaining;
       return true;
     }
     naive_add_padding_frame(tvb, naive_tree, offset,
-                            state->padding_frames[direction] + 1, data_length,
+                            padding_frames + 1, data_length,
                             padding_length);
-    if (data_length) {
+    if (data_length && !replay) {
       payload = (uint8_t *)wmem_alloc(pinfo->pool, data_length);
       tvb_memcpy(tvb, payload, offset + 3, data_length);
       naive_process_tunnel_bytes(tvb, pinfo, tree, state, direction, payload,
-                                 data_length, naive_tree);
+                                 data_length, naive_tree, call_state);
     }
-    state->padding_frames[direction]++;
+    padding_frames++;
+    if (!replay)
+      state->padding_frames[direction] = padding_frames;
     offset += total;
   }
 
-  if (offset < length) {
+  if (offset < length && !replay) {
     unsigned payload_length = length - offset;
     uint8_t *payload = (uint8_t *)wmem_alloc(pinfo->pool, payload_length);
     proto_tree_add_item(naive_tree, hf_naive_tunneled_data, tvb, offset,
                         payload_length, ENC_NA);
     tvb_memcpy(tvb, payload, offset, payload_length);
     naive_process_tunnel_bytes(tvb, pinfo, tree, state, direction, payload,
-                               payload_length, naive_tree);
+                               payload_length, naive_tree, call_state);
+  } else if (offset < length) {
+    proto_tree_add_item(naive_tree, hf_naive_tunneled_data, tvb, offset,
+                        length - offset, ENC_NA);
   }
+  if (replay)
+    naive_replay_call(tvb, pinfo, tree, state, call_state, naive_tree);
+  call_state->processed = true;
   return true;
 }
 

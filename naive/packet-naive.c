@@ -160,6 +160,9 @@ static void naive_call_inner_tls(tvbuff_t *parent, packet_info *pinfo,
                                  const uint8_t *bytes, unsigned length) {
   conversation_element_t *saved_elements = pinfo->conv_elements;
   port_type saved_ptype = pinfo->ptype;
+  uint16_t saved_can_desegment = pinfo->can_desegment;
+  int saved_desegment_offset = pinfo->desegment_offset;
+  uint32_t saved_desegment_len = pinfo->desegment_len;
   uint8_t *copy = (uint8_t *)g_memdup2(bytes, length);
   tvbuff_t *tls_tvb = tvb_new_child_real_data(parent, copy, length, length);
 
@@ -168,7 +171,12 @@ static void naive_call_inner_tls(tvbuff_t *parent, packet_info *pinfo,
   conversation_set_elements_by_id(pinfo, CONVERSATION_NONE,
                                   state->inner_conversation_id);
   pinfo->ptype = PT_NONE;
-  call_dissector(tls_handle, tls_tvb, pinfo, tree);
+  pinfo->desegment_offset = 0;
+  pinfo->desegment_len = 0;
+  call_dissector(tls_handle, tls_tvb, pinfo, proto_tree_get_root(tree));
+  pinfo->can_desegment = saved_can_desegment;
+  pinfo->desegment_offset = saved_desegment_offset;
+  pinfo->desegment_len = saved_desegment_len;
   pinfo->ptype = saved_ptype;
   pinfo->conv_elements = saved_elements;
 }

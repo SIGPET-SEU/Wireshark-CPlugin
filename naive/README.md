@@ -9,6 +9,11 @@ direction, reassembles TLS records across DATA frames, and invokes the stock TLS
 dissector in an isolated conversation. With secrets for both layers, HTTPS is
 shown as `TCP -> TLS -> HTTP/2 -> NaiveProxy -> TLS -> HTTP/1.1 or HTTP/2`.
 
+Wireshark 4.4.2 also requires
+`wireshark-patches/wireshark-4.4.2-tls-explicit-conversation.patch`. It makes
+TLS honor the explicit child-conversation identity so concurrent Naive HTTP/2
+streams keep independent cipher and application state.
+
 The plugin deliberately does not display `Proxy-Authorization`. Its supported
 scope is TCP tunnelling over HTTP/2; QUIC/HTTP/3 and generic non-TLS tunneled
 protocol dissection are outside the initial research scope.

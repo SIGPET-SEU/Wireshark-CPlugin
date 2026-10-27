@@ -10,7 +10,7 @@
 include(WiresharkPlugin)
 
 # Plugin name and version info (major minor micro extra)
-set_module_info(trojan 0 0 1 0)
+set_module_info(trojan 0 1 0 0)
 
 set(DISSECTOR_SRC
 	packet-trojan.c

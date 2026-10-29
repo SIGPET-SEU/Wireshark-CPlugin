@@ -25,7 +25,7 @@ register_plugin_files(plugin.c
 )
 
 add_wireshark_plugin_library(hysteria2 epan)
-target_link_libraries(hysteria2 epan)
+target_link_libraries(hysteria2 epan ${GCRYPT_LIBRARIES})
 install_plugin(hysteria2 epan)
 
 CHECKAPI(
